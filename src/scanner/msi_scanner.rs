@@ -176,11 +176,11 @@ fn scan_product_components(
 
 /// Decode REG_SZ bytes (UTF-16 LE, null-terminated) to String.
 fn decode_reg_sz(bytes: &[u8]) -> Result<String, ()> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(());
     }
     let words: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .collect();
     // Strip null terminator

@@ -68,9 +68,8 @@ fn exe_from_uninstall_string(s: &str) -> Option<String> {
     }
 
     // If the string starts with a quote, extract everything between the first pair of quotes
-    let exe_path = if s.starts_with('"') {
+    let exe_path = if let Some(rest) = s.strip_prefix('"') {
         // Find the closing quote
-        let rest = &s[1..];
         let end = rest.find('"').unwrap_or(rest.len());
         &rest[..end]
     } else {

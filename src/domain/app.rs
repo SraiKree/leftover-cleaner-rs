@@ -18,7 +18,7 @@ pub struct Scanned;
 pub struct Purged;
 
 /// Application with type-state parameter for compile-time lifecycle enforcement
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Application<State> {
     /// Application metadata
     pub metadata: AppMetadata,
