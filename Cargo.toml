@@ -2,10 +2,13 @@
 name = "leftover-cleaner-rs"
 version = "0.1.0"
 edition = "2021"
-description = "A Windows CLI tool for safely removing leftover files and registry entries after uninstallation"
-authors = ["Your Name"]
+description = "High-performance Windows leftover cleaner — scans registry + filesystem for residue after uninstallation"
+authors = ["Reconstructed from Geek Uninstaller"]
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/yourusername/leftover-cleaner-rs"
+keywords = ["windows", "uninstaller", "cleaner", "registry", "leftover"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 windows = { version = "0.56", features = [
