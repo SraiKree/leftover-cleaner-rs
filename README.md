@@ -1,6 +1,6 @@
 # Leftover Cleaner RS
 
-**High-performance Windows leftover cleaner** — scans registry + filesystem for leftover files after uninstallation. Built in Rust, reverse-engineered from Geek Uninstaller.
+**High-performance Windows leftover cleaner** — scans registry + filesystem for leftover files after uninstallation.
 
 ## Features
 
