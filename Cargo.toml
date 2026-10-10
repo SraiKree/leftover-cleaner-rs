@@ -16,7 +16,7 @@ windows = { version = "0.56", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_ComponentServices",
-    "Win32_System_Registry"
+    "Win32_System_JobObjects"
 ] }
 winreg = "0.51"
 rayon = "1.8"

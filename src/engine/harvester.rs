@@ -45,12 +45,10 @@ fn enumerate_uninstall_keys(
     parent_key: &RegKey,
     apps: &mut Vec<AppMetadata>,
 ) -> HarvesterResult<()> {
-    for subkey_name in parent_key.enum_keys() {
-        if let Ok(subkey_name) = subkey_name {
-            if let Ok(subkey) = parent_key.open_subkey(&subkey_name) {
-                if let Some(metadata) = parse_app_metadata(&subkey) {
-                    apps.push(metadata);
-                }
+    for subkey_name in parent_key.enum_keys().flatten() {
+        if let Ok(subkey) = parent_key.open_subkey(&subkey_name) {
+            if let Some(metadata) = parse_app_metadata(&subkey) {
+                apps.push(metadata);
             }
         }
     }
@@ -92,28 +90,19 @@ fn parse_app_metadata(regkey: &RegKey) -> Option<AppMetadata> {
     metadata.version = read_reg_string(regkey, "DisplayVersion");
     
     // Check if this is a system component
-    metadata.system_component = match read_reg_dword(regkey, "SystemComponent") {
-        Some(1) => true,
-        _ => false,
-    };
+    metadata.system_component = matches!(read_reg_dword(regkey, "SystemComponent"), Some(1));
     
     Some(metadata)
 }
 
 /// Read a string value from registry
 fn read_reg_string(regkey: &RegKey, name: &str) -> Option<String> {
-    match regkey.get_value::<String, _>(name) {
-        Ok(value) => Some(value),
-        Err(_) => None,
-    }
+    regkey.get_value::<String, _>(name).ok()
 }
 
 /// Read a DWORD value from registry
 fn read_reg_dword(regkey: &RegKey, name: &str) -> Option<u32> {
-    match regkey.get_value::<u32, _>(name) {
-        Ok(value) => Some(value),
-        Err(_) => None,
-    }
+    regkey.get_value::<u32, _>(name).ok()
 }
 
 /// Validate install date format (YYYYMMDD)
