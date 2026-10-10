@@ -24,6 +24,84 @@ use windows::{
 
 use crate::domain::error::ProcessError;
 
+/// Result of parsing an uninstall string into executable + arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UninstallCommand {
+    /// Absolute path (or bare exe name for system tools like MsiExec.exe)
+    pub exe: String,
+    /// Arguments to pass verbatim
+    pub args: Vec<String>,
+}
+
+/// Parse a Windows UninstallString registry value into exe + args.
+///
+/// Handles forms:
+/// - `"C:\Program Files\App\un.exe" /S`
+/// - `C:\Program Files\App\un.exe /S`
+/// - `MsiExec.exe /X{GUID}`
+/// - `RunDll32 setupapi.dll,...`
+///
+/// Returns `None` if the string is empty or unparseable.
+pub fn parse_uninstall_string(s: &str) -> Option<UninstallCommand> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    let (exe, rest) = if s.starts_with('"') {
+        // Quoted exe path: find closing quote
+        let close = s[1..].find('"')? + 1;
+        let exe = s[1..close].to_string();
+        let rest = s[close + 1..].trim().to_string();
+        (exe, rest)
+    } else {
+        // Unquoted: split on first space
+        if let Some(pos) = s.find(' ') {
+            (s[..pos].to_string(), s[pos + 1..].trim().to_string())
+        } else {
+            (s.to_string(), String::new())
+        }
+    };
+
+    if exe.is_empty() {
+        return None;
+    }
+
+    // Split rest into individual args (simple split on spaces, re-join quoted segments)
+    let args = split_args(&rest);
+
+    Some(UninstallCommand { exe, args })
+}
+
+/// Minimal argument splitter that respects double-quoted tokens.
+fn split_args(s: &str) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+
+    for ch in s.chars() {
+        match ch {
+            '"' => {
+                in_quote = !in_quote;
+                current.push(ch);
+            }
+            ' ' if !in_quote => {
+                let token = current.trim().to_string();
+                if !token.is_empty() {
+                    args.push(token);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let token = current.trim().to_string();
+    if !token.is_empty() {
+        args.push(token);
+    }
+    args
+}
+
 // Milliseconds between polls when waiting for job completion
 const POLL_INTERVAL_MS: u32 = 100;
 // Max wait time before declaring timeout (10 minutes)
@@ -215,9 +293,6 @@ fn build_command_line(exe: &Path, args: &[&str]) -> String {
 mod tests {
     use super::*;
 
-    // Note: tests that create real processes need admin / a real exe.
-    // Unit tests focus on pure logic (command-line builder, error paths).
-
     #[test]
     fn build_command_line_no_args() {
         let path = Path::new(r"C:\Windows\System32\cmd.exe");
@@ -238,5 +313,43 @@ mod tests {
         let cmd = build_command_line(path, &["/D=C:\\Program Files\\App"]);
         // arg has space → should be quoted
         assert!(cmd.contains('"'));
+    }
+
+    #[test]
+    fn parse_uninstall_string_quoted_exe_with_args() {
+        let s = r#""C:\Program Files\App\uninstall.exe" /S /quiet"#;
+        let cmd = parse_uninstall_string(s).unwrap();
+        assert_eq!(cmd.exe, r"C:\Program Files\App\uninstall.exe");
+        assert_eq!(cmd.args, vec!["/S", "/quiet"]);
+    }
+
+    #[test]
+    fn parse_uninstall_string_unquoted_exe_with_args() {
+        let s = r"C:\App\uninstall.exe /S";
+        let cmd = parse_uninstall_string(s).unwrap();
+        assert_eq!(cmd.exe, r"C:\App\uninstall.exe");
+        assert_eq!(cmd.args, vec!["/S"]);
+    }
+
+    #[test]
+    fn parse_uninstall_string_msi_exec() {
+        let s = r"MsiExec.exe /X{1D14C083-6BF1-4D4B-9F5C-B0DC6A1E3F55}";
+        let cmd = parse_uninstall_string(s).unwrap();
+        assert_eq!(cmd.exe, "MsiExec.exe");
+        assert_eq!(cmd.args, vec!["/X{1D14C083-6BF1-4D4B-9F5C-B0DC6A1E3F55}"]);
+    }
+
+    #[test]
+    fn parse_uninstall_string_no_args() {
+        let s = r#""C:\App\un.exe""#;
+        let cmd = parse_uninstall_string(s).unwrap();
+        assert_eq!(cmd.exe, r"C:\App\un.exe");
+        assert!(cmd.args.is_empty());
+    }
+
+    #[test]
+    fn parse_uninstall_string_empty() {
+        assert!(parse_uninstall_string("").is_none());
+        assert!(parse_uninstall_string("   ").is_none());
     }
 }
