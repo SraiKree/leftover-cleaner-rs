@@ -1,4 +1,4 @@
-# Leftover Cleaner RS
+# Bucket Uninstaller
 
 **High-performance Windows leftover cleaner** — runs the app's uninstaller, then scans the registry and filesystem for whatever it left behind.
 
@@ -26,27 +26,27 @@
 ```powershell
 cargo build --release
 ```
-Binary: `target\release\leftover-cleaner-rs.exe`
+Binary: `target\release\bucket-uninstaller.exe`
 
 ### Run
 ```powershell
 # Normal workflow: pick an app, run its uninstaller, then scan and clean leftovers
-.\leftover-cleaner-rs.exe
+.\bucket-uninstaller.exe
 
 # Dry-run: preview what would be deleted, nothing is removed
-.\leftover-cleaner-rs.exe --dry-run
+.\bucket-uninstaller.exe --dry-run
 
 # Skip the uninstaller step (scan-only, for already-uninstalled apps)
-.\leftover-cleaner-rs.exe --skip-uninstall
+.\bucket-uninstaller.exe --skip-uninstall
 
 # Verbose logging
-.\leftover-cleaner-rs.exe --verbose
+.\bucket-uninstaller.exe --verbose
 ```
 
 ## Command-Line Options
 
 ```
-leftover-cleaner-rs [OPTIONS]
+bucket-uninstaller [OPTIONS]
 
 Options:
   -v, --verbose         Enable verbose logging
@@ -74,12 +74,12 @@ The first screen lets you find and pick the app to uninstall and clean.
 
 ```
 ┌─ header bar ─────────────────────────────────────────── ● READY ─┐
-│ SECTIONS      │  🔍 Search apps...                  247 total    │
-│  [1] Overview │ ┌── Apps & Packages ───────────────────────────┐ │
-│  [2] Apps  247│ │ ☐ 7-Zip 23.01              Publisher  Size  │ │
-│  [3] Deep Scan│ │ ☐ Adobe Acrobat Reader     Adobe Inc  412 MB│ │
-│  [4] Caches   │ │ ▶ ☐ Google Chrome          Google     142 MB│ │  ← selected
-│  [5] Daemons  │ └──────────────────────────────────────────────┘ │
+│ BUCKET        │  🔍 Search apps...                  247 total    │
+│     .-.       │ ┌── Apps & Packages ───────────────────────────┐ │
+│    /   \      │ │ 7-Zip 23.01                    Publisher Size│ │
+│   |  ~  |     │ │ Adobe Acrobat Reader           Adobe     412 │ │
+│   |_____|     │ │ ▶ Google Chrome                Google    142 │ │  ← selected
+│  /_______\    │ └──────────────────────────────────────────────┘ │
 │ ● 68% Healthy │      Selected App detail panel (right pane)      │
 └── [Enter] Uninstall & Scan  [/] Search  [Tab] Switch Pane  [q] Quit ┘
 ```
@@ -92,10 +92,8 @@ The first screen lets you find and pick the app to uninstall and clean.
 | `/` | Focus the search box |
 | `Esc` | Clear search and restore full list (or exit search box) |
 | `Backspace` | Delete last character in search query |
-| `Tab` | Cycle keyboard focus: App List → Detail → Sidebar → … |
-| `↑` / `↓` (Sidebar focused) | Navigate sidebar sections |
-| `Space` | Toggle checkbox on the highlighted app |
-| `Enter` | Confirm — runs uninstaller then scans for leftovers |
+| `Tab` | Cycle keyboard focus: App List ↔ Detail |
+| `Enter` | Confirm — uninstalls the highlighted app, then scans leftovers |
 | `Ctrl+C` or `q` | Quit |
 
 ### Search behaviour
@@ -125,7 +123,7 @@ Press `Esc` or `q` to abort the scan. The overlay closes automatically when the 
 After scanning, the full leftover list is shown for review and selective deletion.
 
 ```
-┌─ header: leftover-cleaner v0.1.0 │ Reviewing leftovers for: Google Chrome ─┐
+┌─ header: Bucket Uninstaller v0.2.5 │ Reviewing leftovers for: Google Chrome ─┐
 │ ☐ 📄 C:\Program Files\Google\Chrome\…\manifest.json         [H]            │
 │ ☐ 📁 C:\Users\…\AppData\Local\Google\Chrome                 [M]            │
 │ ▶ ☑ 🗝 HKCU\Software\Google\…                                [H]            │

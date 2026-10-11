@@ -1,12 +1,12 @@
 [package]
-name = "leftover-cleaner-rs"
+name = "bucket-uninstaller"
 version = "0.1.0"
 edition = "2021"
-description = "High-performance Windows leftover cleaner — scans registry + filesystem for residue after uninstallation"
-authors = ["Reconstructed from Geek Uninstaller"]
+description = "Windows uninstaller TUI — runs an app's own uninstaller, then scans registry and filesystem for leftover residue"
+authors = ["SraiKree"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/yourusername/leftover-cleaner-rs"
+repository = "https://github.com/SraiKree/leftover-cleaner-rs"
 keywords = ["windows", "uninstaller", "cleaner", "registry", "leftover"]
 categories = ["command-line-utilities", "filesystem"]
 
@@ -46,6 +46,7 @@ tempfile = "3.10"
 lto = true
 codegen-units = 1
 opt-level = 3
+strip = true
 
 [profile.dev]
 opt-level = 0

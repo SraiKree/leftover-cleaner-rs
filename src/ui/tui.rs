@@ -51,51 +51,44 @@ const BORDER: Color = Color::Rgb(30, 42, 58);
 const BORDER_ACTIVE: Color = Color::Rgb(56, 189, 248);
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const APP_TITLE: &str = "Bucket Uninstaller";
+const BUCKET_TICK: Duration = Duration::from_millis(120);
 
-// ─── Section tabs (left sidebar) ─────────────────────────────────────────────
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Section {
-    OverviewHealth,
-    AppsPackages,
-    DeepScanLeftovers,
-    BuildCaches,
-    DaemonsAndTasks,
-}
-
-impl Section {
-    const ALL: &'static [Section] = &[
-        Section::OverviewHealth,
-        Section::AppsPackages,
-        Section::DeepScanLeftovers,
-        Section::BuildCaches,
-        Section::DaemonsAndTasks,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Section::OverviewHealth => "Overview & Health",
-            Section::AppsPackages => "Apps & Packages",
-            Section::DeepScanLeftovers => "Deep Scan Leftovers",
-            Section::BuildCaches => "Target & Build Caches",
-            Section::DaemonsAndTasks => "Daemons & Tasks",
-        }
-    }
-
-    fn badge(self, apps_count: usize) -> Option<String> {
-        match self {
-            Section::AppsPackages => Some(format!("{}", apps_count)),
-            Section::DeepScanLeftovers => Some("3.46".to_string()),
-            Section::BuildCaches => Some("12".to_string()),
-            Section::DaemonsAndTasks => Some("3".to_string()),
-            _ => None,
-        }
-    }
-}
+/// Four-frame ASCII bucket (~9 cols). Tilt left / upright / lid / tilt right.
+const BUCKET_FRAMES: [&[&str]; 4] = [
+    &[
+        r"   .-.   ",
+        r"  /   \  ",
+        r" |  ~  | ",
+        r" |_____| ",
+        r"/_______\",
+    ],
+    &[
+        r"  .-.    ",
+        r" /   \   ",
+        r"|  ~  |  ",
+        r" \_____\ ",
+        r" /______\",
+    ],
+    &[
+        r"   ___   ",
+        r"  /   \  ",
+        r" |  ~  | ",
+        r" |_____| ",
+        r"/_______\",
+    ],
+    &[
+        r"    .-.  ",
+        r"   /   \ ",
+        r"  |  ~  |",
+        r"  /_____/",
+        r" /______\",
+    ],
+];
 
 // ─── Focus pane ───────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusPane {
-    Sidebar,
     AppList,
     Detail,
 }
@@ -106,7 +99,6 @@ struct AppListItem {
     display_name: String,
     publisher: String,
     size_bytes: u64,
-    checked: bool,
 }
 
 impl AppListItem {
@@ -115,7 +107,6 @@ impl AppListItem {
             display_name: app.metadata.display_name.clone(),
             publisher: app.metadata.publisher.clone().unwrap_or_else(|| "Unknown".to_string()),
             size_bytes: app.metadata.estimated_size.unwrap_or(0),
-            checked: false,
         }
     }
 
@@ -141,7 +132,8 @@ pub struct AppSelectionState {
     search_input: String,
     search_focused: bool,
     focus: FocusPane,
-    active_section: usize,
+    bucket_frame: usize,
+    last_bucket_tick: Instant,
     disk_health: u8,
     disk_free_gb: f64,
     disk_total_gb: f64,
@@ -162,7 +154,8 @@ impl AppSelectionState {
             search_input: String::new(),
             search_focused: false,
             focus: FocusPane::AppList,
-            active_section: 1,
+            bucket_frame: 0,
+            last_bucket_tick: Instant::now(),
             disk_health: 68,
             disk_free_gb: 142.6,
             disk_total_gb: 512.0,
@@ -218,6 +211,13 @@ impl AppSelectionState {
         if self.search_input.is_empty() { format!("{} total", total) }
         else { format!("{} match{}", shown, if shown == 1 { "" } else { "es" }) }
     }
+
+    fn tick_bucket(&mut self) {
+        if self.last_bucket_tick.elapsed() >= BUCKET_TICK {
+            self.bucket_frame = (self.bucket_frame + 1) % BUCKET_FRAMES.len();
+            self.last_bucket_tick = Instant::now();
+        }
+    }
 }
 
 // ─── Phase 1 public entry point ───────────────────────────────────────────────
@@ -251,68 +251,50 @@ fn run_selection_loop(
     state: &mut AppSelectionState,
 ) -> Result<Option<usize>, io::Error> {
     loop {
+        state.tick_bucket();
         terminal.draw(|f| draw_main_screen(f, state))?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press { continue; }
+        if !event::poll(Duration::from_millis(80))? {
+            continue;
+        }
 
-            if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
-                return Ok(None);
+        let Event::Key(key) = event::read()? else { continue };
+        if key.kind != KeyEventKind::Press { continue; }
+
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
+            return Ok(None);
+        }
+
+        if state.search_focused {
+            match key.code {
+                KeyCode::Esc => { state.clear_search(); state.search_focused = false; }
+                KeyCode::Backspace => state.pop_char(),
+                KeyCode::Char(c) => state.push_char(c),
+                KeyCode::Down | KeyCode::Enter => {
+                    state.search_focused = false;
+                    state.focus = FocusPane::AppList;
+                }
+                _ => {}
             }
-
-            if state.search_focused {
-                match key.code {
-                    KeyCode::Esc => { state.clear_search(); state.search_focused = false; }
-                    KeyCode::Backspace => state.pop_char(),
-                    KeyCode::Char(c) => state.push_char(c),
-                    KeyCode::Down | KeyCode::Enter => {
-                        state.search_focused = false;
-                        state.focus = FocusPane::AppList;
-                    }
-                    _ => {}
+        } else {
+            match key.code {
+                KeyCode::Char('q') => return Ok(None),
+                KeyCode::Char('/') => { state.search_focused = true; state.focus = FocusPane::AppList; }
+                KeyCode::Tab => {
+                    state.focus = match state.focus {
+                        FocusPane::AppList => FocusPane::Detail,
+                        FocusPane::Detail => FocusPane::AppList,
+                    };
                 }
-            } else {
-                match key.code {
-                    KeyCode::Char('q') => return Ok(None),
-                    KeyCode::Char('/') => { state.search_focused = true; state.focus = FocusPane::AppList; }
-                    KeyCode::Tab => {
-                        state.focus = match state.focus {
-                            FocusPane::Sidebar => FocusPane::AppList,
-                            FocusPane::AppList => FocusPane::Detail,
-                            FocusPane::Detail => FocusPane::Sidebar,
-                        };
+                KeyCode::Down | KeyCode::Char('j') => state.next_app(),
+                KeyCode::Up | KeyCode::Char('k') => state.prev_app(),
+                KeyCode::Esc => state.clear_search(),
+                KeyCode::Enter => {
+                    if let Some(idx) = state.selected_app_index() {
+                        return Ok(Some(idx));
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if state.focus == FocusPane::Sidebar {
-                            state.active_section = (state.active_section + 1) % Section::ALL.len();
-                        } else {
-                            state.next_app();
-                        }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if state.focus == FocusPane::Sidebar {
-                            state.active_section = if state.active_section == 0 {
-                                Section::ALL.len() - 1
-                            } else {
-                                state.active_section - 1
-                            };
-                        } else {
-                            state.prev_app();
-                        }
-                    }
-                    KeyCode::Char(' ') => {
-                        if let Some(idx) = state.selected_app_index() {
-                            state.items[idx].checked = !state.items[idx].checked;
-                        }
-                    }
-                    KeyCode::Esc => state.clear_search(),
-                    KeyCode::Enter => {
-                        if let Some(idx) = state.selected_app_index() {
-                            return Ok(Some(idx));
-                        }
-                    }
-                    _ => {}
                 }
+                _ => {}
             }
         }
     }
@@ -340,13 +322,13 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppSelectionState) {
     f.render_widget(Block::default().style(Style::default().bg(BG_HEADER)), area);
 
     let [brand_area, stats_area, ready_area] = split_h(area, &[
-        Constraint::Length(38), Constraint::Min(0), Constraint::Length(18),
+        Constraint::Length(44), Constraint::Min(0), Constraint::Length(18),
     ]);
 
     let brand = Line::from(vec![
-        " ✦ leftover-cleaner".bold().fg(FG_PRIMARY),
+        format!(" ✦ {APP_TITLE}").bold().fg(FG_PRIMARY),
         Span::raw(" "),
-        "v0.1.0".bold().fg(CYAN).bg(Color::Rgb(10, 30, 48)),
+        format!("v{}", env!("CARGO_PKG_VERSION")).bold().fg(CYAN).bg(Color::Rgb(10, 30, 48)),
     ]);
     f.render_widget(Paragraph::new(brand), brand_area);
 
@@ -371,44 +353,26 @@ fn draw_body(f: &mut Frame, area: Rect, state: &mut AppSelectionState) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, state: &AppSelectionState) {
-    let [sections_area, disk_area] = split_v(area, &[Constraint::Min(0), Constraint::Length(6)]);
+    let [bucket_area, disk_area] = split_v(area, &[Constraint::Min(0), Constraint::Length(6)]);
 
-    let border_col = if state.focus == FocusPane::Sidebar { BORDER_ACTIVE } else { BORDER };
-    let sections_block = Block::default()
+    let bucket_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_col))
-        .title(Span::styled(" SECTIONS ", Style::default().fg(FG_DIM)))
+        .border_style(Style::default().fg(BORDER))
+        .title(Span::styled(" BUCKET ", Style::default().fg(FG_DIM)))
         .style(Style::default().bg(BG_PANEL));
 
-    let inner = sections_block.inner(sections_area);
-    f.render_widget(sections_block, sections_area);
+    let inner = bucket_block.inner(bucket_area);
+    f.render_widget(bucket_block, bucket_area);
 
-    let items: Vec<ListItem> = Section::ALL.iter().enumerate().map(|(i, sec)| {
-        let active = i == state.active_section;
-        let badge = sec.badge(state.items.len());
-        let num = format!("[{}] ", i + 1);
-        let row_bg = if active { BG_SELECTED } else { BG_PANEL };
-
-        let mut spans = vec![
-            Span::styled(num, Style::default().fg(FG_DIM).bg(row_bg)),
-            Span::styled(sec.label(), Style::default()
-                .fg(if active { FG_PRIMARY } else { FG_MED })
-                .bg(row_bg)
-                .add_modifier(if active { Modifier::BOLD } else { Modifier::empty() })),
-        ];
-        if let Some(b) = badge {
-            spans.push(Span::styled(" ", Style::default().bg(row_bg)));
-            spans.push(Span::styled(b, Style::default()
-                .fg(if active { CYAN } else { FG_DIM })
-                .bg(row_bg)
-                .add_modifier(if active { Modifier::BOLD } else { Modifier::empty() })));
-        }
-        ListItem::new(Line::from(spans))
-    }).collect();
-
-    let mut list_state = ListState::default();
-    list_state.select(Some(state.active_section));
-    f.render_stateful_widget(List::new(items).highlight_symbol("▌ "), inner, &mut list_state);
+    let frame = BUCKET_FRAMES[state.bucket_frame];
+    let art: Vec<Line> = frame
+        .iter()
+        .map(|line| Line::from(line.cyan()))
+        .collect();
+    f.render_widget(
+        Paragraph::new(art).alignment(Alignment::Center),
+        inner,
+    );
 
     draw_disk_health(f, disk_area, state);
 }
@@ -510,7 +474,6 @@ fn draw_app_list(f: &mut Frame, area: Rect, state: &mut AppSelectionState) {
     let items: Vec<ListItem> = state.filtered_indices.iter().enumerate().map(|(fi, &item_idx)| {
         let item = &state.items[item_idx];
         let selected = fi == state.selected_filtered;
-        let check = if item.checked { "☑" } else { "☐" };
         let size_str = item.size_label();
         let pub_str = if item.publisher.len() > 20 {
             format!("{}…", &item.publisher[..19])
@@ -525,20 +488,19 @@ fn draw_app_list(f: &mut Frame, area: Rect, state: &mut AppSelectionState) {
             Style::default().fg(FG_PRIMARY).bg(row_bg)
         };
 
-        let used = 4 + item.display_name.len();
+        let used = 2 + item.display_name.len();
         let right_used = size_str.len() + 2;
         let pad = list_width.saturating_sub(used + right_used);
 
         let row = Line::from(vec![
-            Span::styled(format!(" {} ", check), Style::default()
-                .fg(if item.checked { GREEN } else { FG_DIM }).bg(row_bg)),
+            Span::styled(" ", Style::default().bg(row_bg)),
             Span::styled(item.display_name.clone(), name_style),
             Span::styled(" ".repeat(pad), Style::default().bg(row_bg)),
             Span::styled(format!(" {} ", size_str), Style::default().fg(FG_MED).bg(row_bg)),
         ]);
 
         let pub_row = Line::from(vec![
-            Span::styled("    ", Style::default().bg(row_bg)),
+            Span::styled("  ", Style::default().bg(row_bg)),
             Span::styled(pub_str, Style::default().fg(FG_DIM).bg(row_bg)),
         ]);
 
@@ -636,11 +598,6 @@ fn draw_detail_panel(f: &mut Frame, area: Rect, state: &AppSelectionState) {
             Span::styled("[Enter]", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
             Span::styled(" to uninstall & scan", Style::default().fg(FG_DIM)),
         ]));
-        lines.push(Line::from(vec![
-            Span::styled("  Press ", Style::default().fg(FG_DIM)),
-            Span::styled("[Space]", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(" to toggle selection", Style::default().fg(FG_DIM)),
-        ]));
 
         if meta.system_component {
             lines.push(Line::default());
@@ -672,7 +629,7 @@ fn draw_command_bar(f: &mut Frame, area: Rect, state: &AppSelectionState) {
     let name = state.selected_item().map(|i| i.display_name.as_str()).unwrap_or("—");
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  › leftover-cleaner  ", Style::default().fg(FG_DIM)),
+            Span::styled(format!("  › {APP_TITLE}  "), Style::default().fg(FG_DIM)),
             Span::styled(name, Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
             Span::styled("  Ready to uninstall & scan", Style::default().fg(FG_DIM)),
         ])),
@@ -703,8 +660,6 @@ fn draw_status_bar(f: &mut Frame, area: Rect) {
         Paragraph::new(Line::from(vec![
             Span::styled("[Enter]", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
             Span::styled(" Uninstall+Scan  ", Style::default().fg(FG_DIM)),
-            Span::styled("[Space]", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(" Select  ", Style::default().fg(FG_DIM)),
             Span::styled("[Tab]", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
             Span::styled(" Pane  ", Style::default().fg(FG_DIM)),
             Span::styled("[q]", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
@@ -1152,8 +1107,8 @@ fn draw_leftover_review(f: &mut Frame, state: &mut LeftoverReviewState) {
     f.render_widget(Block::default().style(Style::default().bg(BG_HEADER)), header_area);
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" ✦ leftover-cleaner  ", Style::default().fg(FG_PRIMARY).add_modifier(Modifier::BOLD)),
-            Span::styled("v0.1.0  ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ✦ {APP_TITLE}  "), Style::default().fg(FG_PRIMARY).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("v{}  ", env!("CARGO_PKG_VERSION")), Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
             Span::styled("│ Reviewing leftovers for: ", Style::default().fg(FG_DIM)),
             Span::styled(
                 &state.app.metadata.display_name,

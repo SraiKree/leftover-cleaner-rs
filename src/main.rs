@@ -1,20 +1,26 @@
 use clap::Parser;
-use leftover_cleaner_rs::domain::app::{Application, Discovered};
-use leftover_cleaner_rs::domain::leftover::LeftoverItem;
-use leftover_cleaner_rs::engine::{
+use bucket_uninstaller::domain::app::{Application, Discovered};
+use bucket_uninstaller::domain::leftover::LeftoverItem;
+use bucket_uninstaller::engine::{
     cleaner::SafeDeletionEngine, harvester, process::parse_uninstall_string,
     process::resolve_exe_path, process::ProcessTreeGuard, resolver,
 };
-use leftover_cleaner_rs::scanner::{self, UninstallerContext};
-use leftover_cleaner_rs::ui::tui;
+use bucket_uninstaller::scanner::{self, UninstallerContext};
+use bucket_uninstaller::ui::tui;
+use crossterm::{
+    event::DisableMouseCapture,
+    execute,
+    terminal::{disable_raw_mode, LeaveAlternateScreen},
+};
 use std::collections::HashMap;
 use std::error::Error;
+use std::io;
 use std::sync::Arc;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::fmt;
 
 #[derive(Parser, Debug)]
-#[command(name = "leftover-cleaner")]
+#[command(name = "bucket-uninstaller")]
 #[command(about = "Clean leftover files and registry entries after application uninstallation", long_about = None)]
 struct Args {
     /// Enable verbose logging
@@ -30,19 +36,33 @@ struct Args {
     skip_uninstall: bool,
 }
 
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        original(info);
+    }));
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    install_panic_hook();
     let args = Args::parse();
 
     // Initialize tracing
     let log_level = if args.verbose { Level::DEBUG } else { Level::INFO };
     fmt().with_max_level(log_level).init();
 
-    info!("Starting leftover-cleaner-rs v0.1.0");
+    info!(
+        "Starting {} v{}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Elevation check — registry writes and Program Files deletions require admin.
     if !is_elevated() {
         eprintln!(
-            "\n  ⚠  leftover-cleaner must be run as Administrator.\n\n  \
+            "\n  ⚠  Bucket Uninstaller must be run as Administrator.\n\n  \
              Right-click the terminal and choose \"Run as administrator\",\n  \
              then try again.\n"
         );
@@ -240,7 +260,7 @@ fn is_elevated() -> bool {
 /// Returns `UninstallerContext::ran(exit_code)` on success, or
 /// `UninstallerContext::skipped()` if no string, parse fails, or launch fails.
 pub fn run_uninstaller_headless(
-    metadata: &leftover_cleaner_rs::domain::metadata::AppMetadata,
+    metadata: &bucket_uninstaller::domain::metadata::AppMetadata,
 ) -> UninstallerContext {
     let uninstall_str = match &metadata.uninstall_string {
         Some(s) => s.clone(),
