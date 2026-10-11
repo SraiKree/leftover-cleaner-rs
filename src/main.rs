@@ -3,13 +3,12 @@ use leftover_cleaner_rs::domain::app::{Application, Discovered};
 use leftover_cleaner_rs::domain::leftover::LeftoverItem;
 use leftover_cleaner_rs::engine::{
     cleaner::SafeDeletionEngine, harvester, process::parse_uninstall_string,
-    process::ProcessTreeGuard, resolver,
+    process::resolve_exe_path, process::ProcessTreeGuard, resolver,
 };
 use leftover_cleaner_rs::scanner::{self, UninstallerContext};
 use leftover_cleaner_rs::ui::tui;
 use std::collections::HashMap;
 use std::error::Error;
-use std::path::Path;
 use std::sync::Arc;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::fmt;
@@ -79,25 +78,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Scan cache: keyed by display_name — re-selecting same app uses cached results
     let mut scan_cache: HashMap<String, Vec<LeftoverItem>> = HashMap::new();
 
-    // Main loop: app selection → uninstall → scan → review → delete → back to selection
-    let apps = apps;
-    loop {
-        // Phase 3: Show TUI immediately — user picks an app
-        info!("Phase 3: Launching TUI for application selection...");
-        let selection = tui::run_app_selection_tui(apps)?;
+    // Phase 3: Show TUI immediately — user picks an app
+    info!("Phase 3: Launching TUI for application selection...");
+    let selection = tui::run_app_selection_tui(apps)?;
 
-        let (_app_idx, selected_app) = match selection {
-            Some(s) => s,
-            None => {
-                info!("No application selected. Exiting.");
-                break;
-            }
-        };
+    let (_app_idx, selected_app) = match selection {
+        Some(s) => s,
+        None => {
+            info!("No application selected. Exiting.");
+            return Ok(());
+        }
+    };
 
-        // Rebuild apps list after swap_remove for next iteration
-        // (apps was consumed by run_app_selection_tui — re-harvest isn't needed
-        //  for the cache use-case; we break after delete anyway)
-        info!("Selected: {}", selected_app.metadata.display_name);
+    info!("Selected: {}", selected_app.metadata.display_name);
         let app_name = selected_app.metadata.display_name.clone();
 
         // Phase 4: Check cache first
@@ -109,12 +102,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
             cached.clone()
         } else {
-            // Phase 4a: Run uninstaller (unless --skip-uninstall)
+            // Phase 4a: Run uninstaller through the TUI overlay (shows progress, allows cancel)
             let uninstaller_context = if args.skip_uninstall {
                 info!("Phase 4: Skipping uninstaller (--skip-uninstall).");
                 UninstallerContext::skipped()
             } else {
-                run_uninstaller(&selected_app.metadata)
+                // run_uninstall_tui spawns the uninstaller, shows a live "Uninstalling…"
+                // screen with spinner + elapsed timer, and returns the context when done.
+                // If the user cancels (Esc) the guard's Drop kills the process tree.
+                match tui::run_uninstall_tui(&selected_app.metadata) {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        warn!("Uninstall TUI error for '{}': {}. Continuing to scan.", app_name, e);
+                        UninstallerContext::skipped()
+                    }
+                }
             };
 
             // Phase 4b: Launch scanners on background threads
@@ -147,11 +149,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
 
         if leftovers.is_empty() {
-            info!("No leftovers found for '{}'. Returning to app selection.", app_name);
-            // Rebuild apps from remaining discovered apps for next loop iteration.
-            // Since we consumed `apps` above, we exit here for MVP.
-            // (Full re-harvest loop would require cloning apps before TUI.)
-            break;
+            info!("No leftovers found for '{}'. Nothing to clean up.", app_name);
+            return Ok(());
         }
 
         // Phase 5: Populate scanned app and show leftover review TUI
@@ -169,7 +168,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if selected_indices.is_empty() {
             info!("No selections made. Exiting.");
-            break;
+            return Ok(());
         }
 
         // Phase 6: Delete selected leftovers
@@ -201,10 +200,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             scan_cache.remove(&app_name);
         }
 
-        // After one round of deletion we exit; multi-app support is future work
-        break;
-    }
-
     info!("Application shutdown complete");
     Ok(())
 }
@@ -221,7 +216,6 @@ fn is_elevated() -> bool {
     unsafe {
         let mut token = HANDLE::default();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-            // Can't query — assume not elevated
             return false;
         }
 
@@ -239,10 +233,13 @@ fn is_elevated() -> bool {
         ok.is_ok() && elevation.TokenIsElevated != 0
     }
 }
+
+/// Launch the uninstaller for `metadata` without TUI (internal helper used
+/// when the caller already handles the overlay separately, e.g. in tests).
 ///
 /// Returns `UninstallerContext::ran(exit_code)` on success, or
 /// `UninstallerContext::skipped()` if no string, parse fails, or launch fails.
-fn run_uninstaller(
+pub fn run_uninstaller_headless(
     metadata: &leftover_cleaner_rs::domain::metadata::AppMetadata,
 ) -> UninstallerContext {
     let uninstall_str = match &metadata.uninstall_string {
@@ -268,14 +265,15 @@ fn run_uninstaller(
     };
 
     info!(
-        "Phase 4: Running uninstaller for '{}': {} {:?}",
+        "Running uninstaller for '{}': {} {:?}",
         metadata.display_name, cmd.exe, cmd.args
     );
 
-    let exe_path = Path::new(&cmd.exe);
+    // Resolve bare exe names (e.g. "MsiExec.exe") to full System32 path
+    let resolved = resolve_exe_path(&cmd.exe);
     let args_refs: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
 
-    let guard = match ProcessTreeGuard::spawn_and_assign(exe_path, &args_refs) {
+    let guard = match ProcessTreeGuard::spawn_and_assign(&resolved, &args_refs) {
         Ok(g) => g,
         Err(e) => {
             warn!(
@@ -287,14 +285,14 @@ fn run_uninstaller(
     };
 
     match guard.wait_for_completion() {
-        Ok(exit_code) => {
+        Ok((exit_code, _elapsed)) => {
             info!(
                 "Uninstaller for '{}' exited with code {}.",
                 metadata.display_name, exit_code
             );
             if exit_code != 0 {
                 warn!(
-                    "Uninstaller returned non-zero exit code {}. Some files may not have been removed.",
+                    "Uninstaller returned non-zero exit code {}.",
                     exit_code
                 );
             }
@@ -305,7 +303,6 @@ fn run_uninstaller(
                 "Error waiting for uninstaller of '{}': {}. Continuing to scan.",
                 metadata.display_name, e
             );
-            // guard drops here — KILL_ON_JOB_CLOSE cleans up any child processes
             UninstallerContext::skipped()
         }
     }

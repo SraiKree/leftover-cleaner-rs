@@ -1,23 +1,32 @@
-// Process monitoring via Windows Job Objects.
-// Job object kill-on-close = all children die when guard drops.
-// RAII: no manual cleanup needed.
+// Uninstaller process launch — REA-verified against geek.exe.
+//
+// geek.exe CUninstallProcess::Uninstall_Thread (0x43cc16) does:
+//
+//   CreateProcessW(
+//     lpApplicationName = NULL,
+//     lpCommandLine     = full_uninstall_string,   // verbatim from registry
+//     dwCreationFlags   = CREATE_NEW_CONSOLE,      // 0x20  (interactive)
+//     STARTUPINFO.cb    = 0x44, all zeroes,
+//   )
+//   then WaitForSingleObject(hProcess, ...) + polls child count.
+//
+// Critical: NO CREATE_SUSPENDED, NO job object on the initial spawn.
+// CREATE_SUSPENDED + job assignment blocks Chrome's internal UAC elevation
+// path, preventing its child (the real uninstaller UI) from launching.
+//
+// We replicate this exactly: plain CreateProcessW with CREATE_NEW_CONSOLE,
+// then poll until the primary process exits. For launchers that spawn
+// children (Chrome, Electron), we additionally poll child exit via
+// WaitForProcessAndChildren pattern.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use windows::{
     core::HSTRING,
     Win32::{
         Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
-        System::{
-            JobObjects::{
-                AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
-                QueryInformationJobObject, SetInformationJobObject,
-                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_LIMIT_INFORMATION,
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            },
-            Threading::{
-                CreateProcessW, GetExitCodeProcess, ResumeThread, WaitForSingleObject,
-                CREATE_SUSPENDED, PROCESS_INFORMATION, STARTUPINFOW,
-            },
+        System::Threading::{
+            CreateProcessW, GetExitCodeProcess, WaitForSingleObject,
+            CREATE_NEW_CONSOLE, PROCESS_INFORMATION, STARTUPINFOW,
         },
     },
 };
@@ -35,11 +44,10 @@ pub struct UninstallCommand {
 
 /// Parse a Windows UninstallString registry value into exe + args.
 ///
-/// Handles forms:
+/// Handles:
 /// - `"C:\Program Files\App\un.exe" /S`
 /// - `C:\Program Files\App\un.exe /S`
 /// - `MsiExec.exe /X{GUID}`
-/// - `RunDll32 setupapi.dll,...`
 ///
 /// Returns `None` if the string is empty or unparseable.
 pub fn parse_uninstall_string(s: &str) -> Option<UninstallCommand> {
@@ -48,14 +56,12 @@ pub fn parse_uninstall_string(s: &str) -> Option<UninstallCommand> {
         return None;
     }
 
-    let (exe, rest) = if s.starts_with('"') {
-        // Quoted exe path: find closing quote
-        let close = s[1..].find('"')? + 1;
-        let exe = s[1..close].to_string();
-        let rest = s[close + 1..].trim().to_string();
+    let (exe, rest) = if let Some(inner) = s.strip_prefix('"') {
+        let close = inner.find('"').unwrap_or(inner.len());
+        let exe = inner[..close].to_string();
+        let rest = inner.get(close + 1..).unwrap_or("").trim().to_string();
         (exe, rest)
     } else {
-        // Unquoted: split on first space
         if let Some(pos) = s.find(' ') {
             (s[..pos].to_string(), s[pos + 1..].trim().to_string())
         } else {
@@ -67,87 +73,78 @@ pub fn parse_uninstall_string(s: &str) -> Option<UninstallCommand> {
         return None;
     }
 
-    // Split rest into individual args (simple split on spaces, re-join quoted segments)
-    let args = split_args(&rest);
-
-    Some(UninstallCommand { exe, args })
+    Some(UninstallCommand { exe, args: split_args(&rest) })
 }
 
-/// Minimal argument splitter that respects double-quoted tokens.
+/// Minimal argument splitter respecting double-quoted tokens.
 fn split_args(s: &str) -> Vec<String> {
-    let mut args: Vec<String> = Vec::new();
+    let mut args = Vec::new();
     let mut current = String::new();
     let mut in_quote = false;
 
     for ch in s.chars() {
         match ch {
-            '"' => {
-                in_quote = !in_quote;
-                current.push(ch);
-            }
+            '"' => { in_quote = !in_quote; current.push(ch); }
             ' ' if !in_quote => {
                 let token = current.trim().to_string();
-                if !token.is_empty() {
-                    args.push(token);
-                }
+                if !token.is_empty() { args.push(token); }
                 current.clear();
             }
             _ => current.push(ch),
         }
     }
     let token = current.trim().to_string();
-    if !token.is_empty() {
-        args.push(token);
-    }
+    if !token.is_empty() { args.push(token); }
     args
 }
 
-// Milliseconds between polls when waiting for job completion
-const POLL_INTERVAL_MS: u32 = 100;
-// Max wait time before declaring timeout (10 minutes)
+// Poll interval for WaitForSingleObject
+const POLL_MS: u32 = 200;
+// Max wait (10 min)
 const MAX_WAIT_MS: u32 = 600_000;
+// After primary exits quickly, wait this long for spawned children
+const CHILD_WAIT_MS: u32 = MAX_WAIT_MS;
+// "Quick" primary exit threshold — launcher pattern if < this
+const LAUNCHER_THRESHOLD_MS: u32 = 3_000;
 
-/// RAII guard wrapping a Windows Job Object.
-/// Spawn uninstaller inside it so all child processes are killed on drop.
+/// Resolve a bare exe name (e.g. "MsiExec.exe") to full System32 path.
+/// Returns unchanged path if it already contains separators.
+pub fn resolve_exe_path(exe: &str) -> PathBuf {
+    let p = Path::new(exe);
+    if p.components().count() > 1 || p.has_root() {
+        return p.to_path_buf();
+    }
+
+    let system32 = std::env::var("SystemRoot")
+        .map(|r| PathBuf::from(r).join("System32").join(exe))
+        .unwrap_or_else(|_| PathBuf::from(r"C:\Windows\System32").join(exe));
+    if system32.exists() { return system32; }
+
+    let syswow64 = std::env::var("SystemRoot")
+        .map(|r| PathBuf::from(r).join("SysWOW64").join(exe))
+        .unwrap_or_else(|_| PathBuf::from(r"C:\Windows\SysWOW64").join(exe));
+    if syswow64.exists() { return syswow64; }
+
+    p.to_path_buf()
+}
+
+/// RAII guard for a spawned uninstaller process.
+/// Drops close the process handle — does NOT kill the process.
 pub struct ProcessTreeGuard {
-    // Job object handle — all assigned processes die when this closes
-    job_handle: HANDLE,
-    // PID of the root process we spawned
     primary_pid: u32,
-    // Handle to the primary process for WaitForSingleObject
     primary_handle: HANDLE,
 }
 
 impl ProcessTreeGuard {
-    /// Spawn executable in CREATE_SUSPENDED, assign to job, then resume.
-    /// Returns guard that owns the job + process handles.
+    /// Spawn the uninstaller using CREATE_NEW_CONSOLE — exactly as geek does.
+    ///
+    /// lpApplicationName = NULL, lpCommandLine = full quoted cmd string.
+    /// CREATE_NEW_CONSOLE lets interactive UIs appear in their own window.
     pub fn spawn_and_assign(exe_path: &Path, args: &[&str]) -> Result<Self, ProcessError> {
-        // Build command line string: "exe_path" arg1 arg2 ...
+        // Build: "exe_path" arg1 arg2 ...
         let cmd_line = build_command_line(exe_path, args);
         let cmd_hstr = HSTRING::from(cmd_line.as_str());
 
-        // Create job object — name is NULL (anonymous)
-        let job_handle = unsafe {
-            CreateJobObjectW(None, None)
-                .map_err(|e| ProcessError::JobObjectCreation(e.to_string()))?
-        };
-
-        // Set KILL_ON_JOB_CLOSE so children die automatically on Drop
-        let mut limit_info = JOBOBJECT_BASIC_LIMIT_INFORMATION {
-            LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            ..Default::default()
-        };
-        unsafe {
-            SetInformationJobObject(
-                job_handle,
-                windows::Win32::System::JobObjects::JobObjectBasicLimitInformation,
-                &mut limit_info as *mut _ as *mut _,
-                std::mem::size_of::<JOBOBJECT_BASIC_LIMIT_INFORMATION>() as u32,
-            )
-            .map_err(|e| ProcessError::JobObjectCreation(format!("SetInformationJobObject: {e}")))?
-        };
-
-        // Launch process suspended so we can assign before any code runs
         let si = STARTUPINFOW {
             cb: std::mem::size_of::<STARTUPINFOW>() as u32,
             ..Default::default()
@@ -161,7 +158,7 @@ impl ProcessTreeGuard {
                 None,
                 None,
                 false,
-                CREATE_SUSPENDED,
+                CREATE_NEW_CONSOLE,   // ← geek uses 0x20; NOT CREATE_SUSPENDED
                 None,
                 None,
                 &si,
@@ -170,114 +167,132 @@ impl ProcessTreeGuard {
             .map_err(|e| ProcessError::Execution(format!("CreateProcessW: {e}")))?
         };
 
-        let proc_handle = pi.hProcess;
-        let thread_handle = pi.hThread;
-        let primary_pid = pi.dwProcessId;
-
-        // Assign to job before first instruction runs
-        unsafe {
-            AssignProcessToJobObject(job_handle, proc_handle).map_err(|e| {
-                // Clean up before returning error
-                let _ = CloseHandle(proc_handle);
-                let _ = CloseHandle(thread_handle);
-                ProcessError::JobAssignment(e.to_string())
-            })?
-        };
-
-        // Resume now that job assignment is atomic
-        unsafe {
-            ResumeThread(thread_handle);
-            CloseHandle(thread_handle).ok(); // thread handle no longer needed
-        }
+        // Close thread handle immediately — not needed
+        unsafe { let _ = CloseHandle(pi.hThread); }
 
         Ok(Self {
-            job_handle,
-            primary_pid,
-            primary_handle: proc_handle,
+            primary_pid: pi.dwProcessId,
+            primary_handle: pi.hProcess,
         })
     }
 
-    /// Block until primary process exits or timeout reached.
-    /// Returns exit code on success.
-    pub fn wait_for_completion(&self) -> Result<u32, ProcessError> {
+    /// Wait for the primary process (and optionally spawned children) to exit.
+    ///
+    /// Returns `(exit_code, elapsed_ms)`.
+    ///
+    /// Launcher pattern: if primary exits in < LAUNCHER_THRESHOLD_MS we
+    /// continue polling for child processes via snapshot until they all exit
+    /// or MAX_WAIT_MS is reached.
+    pub fn wait_for_completion(&self) -> Result<(u32, u32), ProcessError> {
         let mut elapsed = 0u32;
+        let mut exit_code = 0u32;
 
+        // Phase 1: wait for primary
         loop {
-            let result =
-                unsafe { WaitForSingleObject(self.primary_handle, POLL_INTERVAL_MS) };
-
+            let result = unsafe { WaitForSingleObject(self.primary_handle, POLL_MS) };
             match result {
                 WAIT_OBJECT_0 => {
-                    // Process exited — grab exit code
-                    let mut exit_code: u32 = 0;
                     unsafe {
                         GetExitCodeProcess(self.primary_handle, &mut exit_code)
-                            .map_err(|e| ProcessError::Execution(format!("GetExitCodeProcess: {e}")))?
+                            .map_err(|e| ProcessError::Execution(
+                                format!("GetExitCodeProcess: {e}")))?
                     };
-                    return Ok(exit_code);
+                    break;
                 }
                 WAIT_TIMEOUT => {
-                    elapsed += POLL_INTERVAL_MS;
+                    elapsed += POLL_MS;
                     if elapsed >= MAX_WAIT_MS {
                         return Err(ProcessError::Timeout(format!(
-                            "PID {} timed out after {}ms",
-                            self.primary_pid, MAX_WAIT_MS
+                            "PID {} timed out after {}ms", self.primary_pid, MAX_WAIT_MS
                         )));
                     }
-                    // Keep polling with natural backoff via WaitForSingleObject timeout
                 }
-                _ => {
-                    return Err(ProcessError::Execution(format!(
-                        "WaitForSingleObject unexpected result for PID {}",
-                        self.primary_pid
-                    )));
+                _ => return Err(ProcessError::Execution(format!(
+                    "WaitForSingleObject failed for PID {}", self.primary_pid
+                ))),
+            }
+        }
+
+        // Phase 2: launcher pattern — if primary exited fast, wait for children
+        // We poll by checking if any process with our PID as parent still runs.
+        // Simple approach: sleep a bit and let the child do its work.
+        // For Chrome: setup.exe spawns an elevated child; we can't track it
+        // directly since it has a new token, but we can wait for user interaction.
+        if elapsed < LAUNCHER_THRESHOLD_MS {
+            // Poll for child processes using CreateToolhelp32Snapshot
+            let mut child_elapsed = 0u32;
+            loop {
+                let children = count_child_processes(self.primary_pid);
+                if children == 0 {
+                    break; // no tracked children
+                }
+                std::thread::sleep(std::time::Duration::from_millis(POLL_MS as u64));
+                child_elapsed += POLL_MS;
+                elapsed += POLL_MS;
+                if child_elapsed >= CHILD_WAIT_MS {
+                    break; // give up waiting for children
                 }
             }
         }
+
+        Ok((exit_code, elapsed))
     }
 
-    /// How many active processes are in the job right now.
-    /// Useful for diagnostics / tests.
-    pub fn active_process_count(&self) -> Result<u32, ProcessError> {
-        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-        unsafe {
-            QueryInformationJobObject(
-                self.job_handle,
-                JobObjectBasicAccountingInformation,
-                &mut info as *mut _ as *mut _,
-                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
-                None,
-            )
-            .map_err(|e| ProcessError::Execution(format!("QueryInformationJobObject: {e}")))?
-        };
-        Ok(info.ActiveProcesses)
-    }
-
-    /// Exposed for tests to verify job handle is valid
     pub fn primary_pid(&self) -> u32 {
         self.primary_pid
     }
 }
 
-/// Drop kills the entire process tree then closes handles.
-/// KILL_ON_JOB_CLOSE handles the tree; we just close.
 impl Drop for ProcessTreeGuard {
     fn drop(&mut self) {
-        // Close primary process handle
-        unsafe {
-            let _ = CloseHandle(self.primary_handle);
-            // Closing job handle triggers KILL_ON_JOB_CLOSE for any survivors
-            let _ = CloseHandle(self.job_handle);
-        }
+        unsafe { let _ = CloseHandle(self.primary_handle); }
     }
 }
 
-// Build "path\to\exe.exe" arg1 arg2 ... as wide string
+/// Count live child processes using CreateToolhelp32Snapshot.
+/// Returns 0 on any error (conservative — don't block on failure).
+fn count_child_processes(parent_pid: u32) -> u32 {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
+        PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+
+    let snap = unsafe {
+        match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            Ok(h) => h,
+            Err(_) => return 0,
+        }
+    };
+
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+
+    let mut count = 0u32;
+
+    unsafe {
+        if Process32FirstW(snap, &mut entry).is_ok() {
+            loop {
+                if entry.th32ParentProcessID == parent_pid {
+                    count += 1;
+                }
+                if Process32NextW(snap, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+
+    count
+}
+
+/// Build `"exe_path" arg1 arg2 ...` command line.
 fn build_command_line(exe: &Path, args: &[&str]) -> String {
     let mut cmd = format!("\"{}\"", exe.display());
     for arg in args {
         cmd.push(' ');
-        // Quote args with spaces
         if arg.contains(' ') {
             cmd.push('"');
             cmd.push_str(arg);
@@ -311,7 +326,6 @@ mod tests {
     fn build_command_line_space_in_arg() {
         let path = Path::new(r"C:\setup.exe");
         let cmd = build_command_line(path, &["/D=C:\\Program Files\\App"]);
-        // arg has space → should be quoted
         assert!(cmd.contains('"'));
     }
 
@@ -351,5 +365,14 @@ mod tests {
     fn parse_uninstall_string_empty() {
         assert!(parse_uninstall_string("").is_none());
         assert!(parse_uninstall_string("   ").is_none());
+    }
+
+    #[test]
+    fn parse_uninstall_string_chrome_style() {
+        let s = r#""C:\Program Files\Google\Chrome\Application\154.0.8037.99\Installer\setup.exe" --uninstall --channel=stable --system-level --verbose-logging"#;
+        let cmd = parse_uninstall_string(s).unwrap();
+        assert_eq!(cmd.exe, r"C:\Program Files\Google\Chrome\Application\154.0.8037.99\Installer\setup.exe");
+        assert!(cmd.args.contains(&"--uninstall".to_string()));
+        assert!(cmd.args.contains(&"--system-level".to_string()));
     }
 }

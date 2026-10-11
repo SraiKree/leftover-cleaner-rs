@@ -61,8 +61,8 @@ impl UninstallerContext {
 /// * `metadata`            — Shared application metadata (Arc for rayon workers).
 /// * `install_location`    — Resolved install path, if known.
 /// * `uninstaller_context` — Exit code + ran flag from the uninstaller.
-///                           Items inside the install dir that still exist are promoted
-///                           to High confidence when `ran == true`.
+///   Items inside the install dir that still exist are promoted
+///   to High confidence when `ran == true`.
 ///
 /// # Notes
 /// * Items failing `SafetyValidator::validate` are silently dropped.
