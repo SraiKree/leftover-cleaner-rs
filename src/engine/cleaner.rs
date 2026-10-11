@@ -132,14 +132,20 @@ impl SafeDeletionEngine {
         Ok(())
     }
 
-    /// Delete directories (only if empty)
+    /// Delete directories (only if empty — never recursive).
+    ///
+    /// SAFETY: We use `remove_dir` (not `remove_dir_all`).  If a directory is
+    /// not empty it means either the files inside were not selected for
+    /// deletion, or the resolver found the wrong path.  Silently recursing
+    /// with `remove_dir_all` would delete unrelated files the user never
+    /// reviewed.  The failure is recorded and shown in the report instead.
     fn delete_directories(&mut self, items: &[LeftoverItem]) -> Result<(), DomainError> {
         // Sort by depth (deepest first) to ensure bottom-up deletion
         let mut sorted_items: Vec<_> = items.iter().collect();
         sorted_items.sort_by(|a, b| {
             let depth_a = a.path.matches('\\').count();
             let depth_b = b.path.matches('\\').count();
-            depth_b.cmp(&depth_a) // Reverse order (deepest first)
+            depth_b.cmp(&depth_a)
         });
 
         for item in sorted_items {
@@ -149,21 +155,15 @@ impl SafeDeletionEngine {
                     info!("Deleted directory: {}", item.path);
                     self.deleted_items.push(item.clone());
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
-                    // Try recursive removal if directory not empty
-                    match std::fs::remove_dir_all(&item.path) {
-                        Ok(_) => {
-                            info!("Recursively deleted directory: {}", item.path);
-                            self.deleted_items.push(item.clone());
-                        }
-                        Err(e2) => {
-                            warn!("Failed to delete directory {}: {}", item.path, e2);
-                            self.failed_items.push((item.clone(), e2.to_string()));
-                        }
-                    }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Already gone — treat as success
+                    debug!("Directory already absent: {}", item.path);
                 }
                 Err(e) => {
-                    warn!("Failed to delete directory {}: {}", item.path, e);
+                    // Includes DirectoryNotEmpty — record but don't recurse.
+                    // If the dir still has files the user didn't select, that
+                    // is intentional; do not silently delete them.
+                    warn!("Could not delete directory {} ({}). If it is non-empty, select its contents first.", item.path, e);
                     self.failed_items.push((item.clone(), e.to_string()));
                 }
             }
@@ -194,20 +194,39 @@ impl SafeDeletionEngine {
         Ok(())
     }
 
-    /// Delete a registry key recursively
+    /// Delete a registry key recursively (only the named key and below).
+    ///
+    /// SAFETY GUARD: We refuse to delete any key shallower than 4 levels
+    /// below the hive root.  Anything at depth ≤ 3 (e.g.
+    /// `HKLM\SOFTWARE\Valve`) is a vendor or OS key; deleting it would wipe
+    /// all sub-keys for that vendor, not just the target app.  Legitimate
+    /// leftover keys are always deeper (e.g. `HKLM\SOFTWARE\Valve\Steam\...`
+    /// or `HKLM\SOFTWARE\...\Installer\UserData\<SID>\Products\<GUID>\InstallProperties`).
     fn delete_registry_key(&self, path: &str) -> Result<(), CleanError> {
         let (root, subkey_path) = self.parse_registry_path(path)?;
-        
+
+        // Count backslash-separated components in subkey_path.
+        // `SOFTWARE\Valve` has depth 2 — too shallow.
+        // `SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\...` has depth ≥ 6 — ok.
+        let depth = subkey_path.matches('\\').count() + 1;
+        const MIN_SAFE_DEPTH: usize = 4;
+        if depth < MIN_SAFE_DEPTH {
+            return Err(CleanError::SafetyCheck(format!(
+                "Registry key too shallow to delete safely (depth={}, min={}): {}",
+                depth, MIN_SAFE_DEPTH, path
+            )));
+        }
+
         // Split parent and key name
         let parts: Vec<&str> = subkey_path.rsplitn(2, '\\').collect();
         if parts.is_empty() {
             return Err(CleanError::RegistryKeyDeletion(format!("Invalid registry key path: {}", path)));
         }
-        
+
         let root_key = self.get_root_key(root)?;
-        
+
         if parts.len() == 1 {
-            // Root-level key
+            // Root-level key (already blocked by depth guard above, but kept for completeness)
             let key_name = parts[0];
             RegKey::predef(root_key).delete_subkey_all(key_name)
                 .map_err(|e| CleanError::RegistryKeyDeletion(format!("Cannot delete key: {}", e)))?;
@@ -217,11 +236,11 @@ impl SafeDeletionEngine {
             let parent_path = parts[1];
             let parent = RegKey::predef(root_key).open_subkey_with_flags(parent_path, KEY_SET_VALUE)
                 .map_err(|e| CleanError::RegistryKeyDeletion(format!("Cannot open parent key: {}", e)))?;
-            
+
             parent.delete_subkey_all(key_name)
                 .map_err(|e| CleanError::RegistryKeyDeletion(format!("Cannot delete key: {}", e)))?;
         }
-        
+
         Ok(())
     }
 

@@ -91,7 +91,17 @@ fn parse_app_metadata(regkey: &RegKey) -> Option<AppMetadata> {
     
     // Check if this is a system component
     metadata.system_component = matches!(read_reg_dword(regkey, "SystemComponent"), Some(1));
-    
+
+    // Extract MSI ProductCode from UninstallString if it's an MSI install.
+    // geek.exe reads field +0x3c (the ProductCode) from the harvested item and
+    // uses it directly to construct the UserData path — no name-matching needed.
+    // UninstallString forms:
+    //   MsiExec.exe /I{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}
+    //   MsiExec.exe /X{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}
+    if let Some(ref s) = metadata.uninstall_string {
+        metadata.msi_product_code = extract_msi_product_code(s);
+    }
+
     Some(metadata)
 }
 
@@ -103,6 +113,37 @@ fn read_reg_string(regkey: &RegKey, name: &str) -> Option<String> {
 /// Read a DWORD value from registry
 fn read_reg_dword(regkey: &RegKey, name: &str) -> Option<u32> {
     regkey.get_value::<u32, _>(name).ok()
+}
+
+/// Extract the MSI ProductCode GUID from an UninstallString.
+///
+/// Matches the two canonical MSI forms (verified against geek.exe behaviour):
+///   MsiExec.exe /I{GUID}   — install-mode uninstall
+///   MsiExec.exe /X{GUID}   — remove-mode uninstall
+///
+/// Returns the GUID with its surrounding braces, e.g.
+///   `{7D2F3875-1019-2D11-E1E0-00B0D099CB9E}`
+/// because that is exactly how it appears as the Products subkey name in
+///   HKLM\SOFTWARE\...\Installer\UserData\<SID>\Products\<GUID>
+fn extract_msi_product_code(uninstall_string: &str) -> Option<String> {
+    // Case-insensitive search for MsiExec
+    let lower = uninstall_string.to_lowercase();
+    if !lower.contains("msiexec") {
+        return None;
+    }
+    // Find /I{ or /X{ (case-insensitive)
+    for flag in &["/i{", "/x{"] {
+        if let Some(flag_pos) = lower.find(flag) {
+            // The GUID starts at the '{' character
+            let brace_start = flag_pos + flag.len() - 1; // points to '{'
+            let rest = &uninstall_string[brace_start..];
+            if let Some(end) = rest.find('}') {
+                let guid = &rest[..=end]; // includes both braces
+                return Some(guid.to_uppercase());
+            }
+        }
+    }
+    None
 }
 
 /// Validate install date format (YYYYMMDD)
@@ -119,6 +160,44 @@ mod tests {
     use super::*;
 
     
+    #[test]
+    fn test_extract_msi_product_code_install_mode() {
+        let s = r"MsiExec.exe /I{7D2F3875-1019-2D11-E1E0-00B0D099CB9E}";
+        assert_eq!(
+            extract_msi_product_code(s),
+            Some("{7D2F3875-1019-2D11-E1E0-00B0D099CB9E}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_msi_product_code_remove_mode() {
+        let s = r"MsiExec.exe /X{12345678-1234-1234-1234-123456789012}";
+        assert_eq!(
+            extract_msi_product_code(s),
+            Some("{12345678-1234-1234-1234-123456789012}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_msi_product_code_case_insensitive() {
+        let s = r"msiexec.exe /x{AABBCCDD-AABB-AABB-AABB-AABBCCDDEEFF}";
+        assert_eq!(
+            extract_msi_product_code(s),
+            Some("{AABBCCDD-AABB-AABB-AABB-AABBCCDDEEFF}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_msi_product_code_non_msi() {
+        let s = r#""C:\Program Files\App\uninstall.exe" /silent"#;
+        assert_eq!(extract_msi_product_code(s), None);
+    }
+
+    #[test]
+    fn test_extract_msi_product_code_none_on_empty() {
+        assert_eq!(extract_msi_product_code(""), None);
+    }
+
     #[test]
     fn test_valid_install_date() {
         assert!(is_valid_install_date("20231015"));

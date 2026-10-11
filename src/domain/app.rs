@@ -112,6 +112,7 @@ mod tests {
             estimated_size: None,
             version: None,
             system_component: false,
+            msi_product_code: None,
         };
         
         // Start with Discovered state
@@ -142,6 +143,7 @@ mod tests {
             estimated_size: None,
             version: None,
             system_component: false,
+            msi_product_code: None,
         };
         
         let mut app = Application::<Discovered>::new(metadata);

@@ -30,6 +30,13 @@ pub struct AppMetadata {
     
     /// Whether this is a system component
     pub system_component: bool,
+
+    /// MSI ProductCode GUID, extracted from UninstallString when it contains
+    /// `MsiExec.exe /I{GUID}` or `MsiExec.exe /X{GUID}`.
+    /// This is the exact key used in:
+    ///   HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\<SID>\Products\<msi_product_code>
+    /// Only present for MSI-installed applications.
+    pub msi_product_code: Option<String>,
 }
 
 impl AppMetadata {
@@ -45,6 +52,7 @@ impl AppMetadata {
             estimated_size: None,
             version: None,
             system_component: false,
+            msi_product_code: None,
         }
     }
     

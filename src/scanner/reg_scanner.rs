@@ -102,6 +102,11 @@ fn try_flag_software_key(
 }
 
 /// Scan HKCU + HKLM + HKLM\WOW6432Node Software subkeys.
+///
+/// SAFETY NOTE: we only flag `<publisher>\<app>` or `<app>` subkeys, never
+/// the bare publisher key.  Flagging `HKCU\Software\Valve` would wipe every
+/// Valve title's registry data — we must require the app name to be present
+/// in the subkey path.
 pub fn scan_software_keys(
     metadata: &AppMetadata,
     tx: &Sender<LeftoverItem>,
@@ -109,16 +114,12 @@ pub fn scan_software_keys(
     let app = &metadata.display_name;
     let pub_opt = metadata.publisher.as_deref();
 
-    // Define (hive, root_path, display_prefix) tuples
-    let roots: &[(&str, &str, RegKey)] = &[
-        // We build RegKey inside the array by opening; use a helper instead
-    ];
-    let _ = roots; // unused — we enumerate below explicitly
-
     // ── HKCU\Software ────────────────────────────────────────────────────────
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     if let Ok(sw) = hkcu.open_subkey(r"Software") {
+        // <app> directly under Software
         try_flag_software_key(&sw, app, tx, r"HKEY_CURRENT_USER\Software");
+        // <publisher>\<app> — app name must be the leaf, not the publisher alone
         if let Some(pub_name) = pub_opt {
             try_flag_software_key(
                 &sw,
@@ -126,12 +127,7 @@ pub fn scan_software_keys(
                 tx,
                 r"HKEY_CURRENT_USER\Software",
             );
-            try_flag_software_key(
-                &sw,
-                pub_name,
-                tx,
-                r"HKEY_CURRENT_USER\Software",
-            );
+            // Do NOT flag bare pub_name — that would delete all apps by this publisher
         }
     }
 
@@ -146,12 +142,7 @@ pub fn scan_software_keys(
                 tx,
                 r"HKEY_LOCAL_MACHINE\Software",
             );
-            try_flag_software_key(
-                &sw,
-                pub_name,
-                tx,
-                r"HKEY_LOCAL_MACHINE\Software",
-            );
+            // Do NOT flag bare pub_name
         }
     }
 
@@ -165,6 +156,7 @@ pub fn scan_software_keys(
                 tx,
                 r"HKEY_LOCAL_MACHINE\Software\WOW6432Node",
             );
+            // Do NOT flag bare pub_name
         }
     }
 

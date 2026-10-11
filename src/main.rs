@@ -40,6 +40,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Starting leftover-cleaner-rs v0.1.0");
 
+    // Elevation check — registry writes and Program Files deletions require admin.
+    if !is_elevated() {
+        eprintln!(
+            "\n  ⚠  leftover-cleaner must be run as Administrator.\n\n  \
+             Right-click the terminal and choose \"Run as administrator\",\n  \
+             then try again.\n"
+        );
+        std::process::exit(1);
+    }
+
     // Phase 1: Harvest installed applications
     info!("Phase 1: Harvesting installed applications...");
     let metadata_list = harvester::harvest_installed_apps()?;
@@ -199,7 +209,36 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Attempt to run the app's uninstaller via `ProcessTreeGuard`.
+/// Returns true when the current process token has the Administrators group
+/// enabled (i.e. the process is running elevated on Windows).
+fn is_elevated() -> bool {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            // Can't query — assume not elevated
+            return false;
+        }
+
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut return_length = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut return_length,
+        );
+
+        let _ = windows::Win32::Foundation::CloseHandle(token);
+        ok.is_ok() && elevation.TokenIsElevated != 0
+    }
+}
 ///
 /// Returns `UninstallerContext::ran(exit_code)` on success, or
 /// `UninstallerContext::skipped()` if no string, parse fails, or launch fails.
