@@ -35,38 +35,26 @@ impl LeftoverKind {
     }
 }
 
-/// Confidence level for leftover detection
+/// Physical category of leftover item matching Geek Uninstaller
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConfidenceLevel {
-    /// High confidence (direct match with application)
-    High,
-    /// Medium confidence (probable match)
-    Medium,
-    /// Low confidence (possible match)
-    Low,
+pub enum LeftoverCategory {
+    /// Files, directories, shortcuts
+    FileSystem,
+    /// Registry keys and values
+    Registry,
 }
 
-impl ConfidenceLevel {
-    /// Get a human-readable description of the confidence level
+impl LeftoverCategory {
+    /// Human-readable label
     pub fn description(&self) -> &'static str {
         match self {
-            ConfidenceLevel::High => "High",
-            ConfidenceLevel::Medium => "Medium",
-            ConfidenceLevel::Low => "Low",
-        }
-    }
-    
-    /// Get a numeric value for sorting (higher = more confident)
-    pub fn numeric_value(&self) -> u8 {
-        match self {
-            ConfidenceLevel::High => 3,
-            ConfidenceLevel::Medium => 2,
-            ConfidenceLevel::Low => 1,
+            LeftoverCategory::FileSystem => "Files & Folders",
+            LeftoverCategory::Registry => "Registry Entries",
         }
     }
 }
 
-/// A leftover item found after application uninstallation
+/// A verified leftover item found after application uninstallation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeftoverItem {
     /// Path to the leftover item
@@ -77,54 +65,56 @@ pub struct LeftoverItem {
     /// Type of leftover item
     pub kind: LeftoverKind,
     
-    /// Confidence level for this detection
-    pub confidence: ConfidenceLevel,
+    /// Category matching Geek Uninstaller categorization (FileSystem or Registry)
+    pub category: LeftoverCategory,
     
-    /// Source of the detection (e.g., "File system scan", "Registry scan", "MSI database")
+    /// Source of detection (e.g., "Install path", "AppData", "MSI database", etc.)
     pub source: String,
+
+    /// Whether this item is cleanable (false if blocked by SharedDLL ref count, etc.)
+    pub cleanable: bool,
 }
 
 impl LeftoverItem {
     /// Create a new leftover item
-    pub fn new(path: String, kind: LeftoverKind, confidence: ConfidenceLevel, source: String) -> Self {
+    pub fn new(path: String, kind: LeftoverKind, category: LeftoverCategory, source: String) -> Self {
         Self {
             path,
             kind,
-            confidence,
+            category,
             source,
+            cleanable: true,
         }
     }
     
     /// Create a file leftover item
-    pub fn file(path: String, confidence: ConfidenceLevel, source: String) -> Self {
-        Self::new(path, LeftoverKind::File, confidence, source)
+    pub fn file(path: String, source: String) -> Self {
+        Self::new(path, LeftoverKind::File, LeftoverCategory::FileSystem, source)
     }
     
     /// Create a directory leftover item
-    pub fn directory(path: String, confidence: ConfidenceLevel, source: String) -> Self {
-        Self::new(path, LeftoverKind::Directory, confidence, source)
+    pub fn directory(path: String, source: String) -> Self {
+        Self::new(path, LeftoverKind::Directory, LeftoverCategory::FileSystem, source)
     }
     
     /// Create a registry value leftover item
-    pub fn registry_value(path: String, confidence: ConfidenceLevel, source: String) -> Self {
-        Self::new(path, LeftoverKind::RegistryValue, confidence, source)
+    pub fn registry_value(path: String, source: String) -> Self {
+        Self::new(path, LeftoverKind::RegistryValue, LeftoverCategory::Registry, source)
     }
     
     /// Create a registry key leftover item
-    pub fn registry_key(path: String, confidence: ConfidenceLevel, source: String) -> Self {
-        Self::new(path, LeftoverKind::RegistryKey, confidence, source)
+    pub fn registry_key(path: String, source: String) -> Self {
+        Self::new(path, LeftoverKind::RegistryKey, LeftoverCategory::Registry, source)
     }
     
     /// Get a human-readable description of the leftover item
     pub fn description(&self) -> String {
-        format!("{} ({} confidence)", self.path, self.confidence.description())
+        format!("{} [{}]", self.path, self.category.description())
     }
     
     /// Check if this item can be safely deleted
-    /// (Currently always returns true, but will be enhanced with safety checks later)
     pub fn can_be_deleted(&self) -> bool {
-        // TODO: Add safety checks (system files, shared dependencies, etc.)
-        true
+        self.cleanable
     }
 }
 
@@ -146,21 +136,21 @@ mod tests {
     }
     
     #[test]
-    fn test_confidence_level_ordering() {
-        assert!(ConfidenceLevel::High.numeric_value() > ConfidenceLevel::Medium.numeric_value());
-        assert!(ConfidenceLevel::Medium.numeric_value() > ConfidenceLevel::Low.numeric_value());
+    fn test_leftover_category() {
+        assert_eq!(LeftoverCategory::FileSystem.description(), "Files & Folders");
+        assert_eq!(LeftoverCategory::Registry.description(), "Registry Entries");
     }
     
     #[test]
     fn test_leftover_item_creation() {
         let file_item = LeftoverItem::file(
             "C:\\Program Files\\TestApp\\leftover.dll".to_string(),
-            ConfidenceLevel::High,
             "File system scan".to_string(),
         );
         
         assert_eq!(file_item.kind, LeftoverKind::File);
-        assert_eq!(file_item.confidence, ConfidenceLevel::High);
-        assert!(file_item.description().contains("High confidence"));
+        assert_eq!(file_item.category, LeftoverCategory::FileSystem);
+        assert!(file_item.can_be_deleted());
+        assert!(file_item.description().contains("Files & Folders"));
     }
 }

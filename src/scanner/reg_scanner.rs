@@ -35,7 +35,7 @@ use winreg::{
 use crate::{
     domain::{
         error::ScannerError,
-        leftover::{ConfidenceLevel, LeftoverItem},
+        leftover::{LeftoverCategory, LeftoverItem},
         metadata::AppMetadata,
     },
     engine::safety::{SOURCE_CLSID, SOURCE_INSTALL_PATH},

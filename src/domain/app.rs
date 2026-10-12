@@ -98,7 +98,7 @@ impl Application<Purged> {
 mod tests {
     use super::*;
     use crate::domain::metadata::AppMetadata;
-    use crate::domain::leftover::{LeftoverItem, LeftoverKind, ConfidenceLevel};
+    use crate::domain::leftover::{LeftoverItem, LeftoverKind};
 
     #[test]
     fn test_type_state_transitions() {
@@ -148,12 +148,10 @@ mod tests {
         
         let mut app = Application::<Discovered>::new(metadata);
         
-        let leftover = LeftoverItem {
-            path: "C:\\Program Files\\TestApp\\leftover.dll".to_string(),
-            kind: LeftoverKind::File,
-            confidence: ConfidenceLevel::High,
-            source: "File system scan".to_string(),
-        };
+        let leftover = LeftoverItem::file(
+            "C:\\Program Files\\TestApp\\leftover.dll".to_string(),
+            "File system scan".to_string(),
+        );
         
         app.add_leftover(leftover);
         assert_eq!(app.leftover_count(), 1);

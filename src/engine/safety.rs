@@ -26,7 +26,7 @@ use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
 
 use crate::domain::{
     error::CleanError,
-    leftover::{ConfidenceLevel, LeftoverItem, LeftoverKind},
+    leftover::{LeftoverItem, LeftoverKind},
 };
 
 // Source tag constants used by scanners
@@ -37,38 +37,76 @@ pub const SOURCE_CLSID: &str = "CLSID";
 // Registry path for shared DLL reference counts
 const SHARED_DLLS_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs";
 
-/// Classifies a path by its detection source.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DetectionSource {
-    /// Matches app's recorded install location — most trustworthy
-    InstallPath,
-    /// Found in user/app data directories
-    AppData,
-    /// Found via CLSID / COM registration
-    Clsid,
-    /// Custom source string (passed through as Low)
-    Other(String),
-}
+/// Known protected vendor root directories that should never be flagged directly as an install location
+const PROTECTED_VENDOR_ROOTS: &[&str] = &[
+    "microsoft",
+    "windows",
+    "common files",
+    "adobe",
+    "google",
+    "mozilla",
+    "intel",
+    "nvidia",
+    "amd",
+    "apple",
+    "oracle",
+];
 
-impl DetectionSource {
-    /// Map source tag string (from LeftoverItem.source) to enum variant
-    pub fn from_source_str(s: &str) -> Self {
-        match s {
-            SOURCE_INSTALL_PATH => DetectionSource::InstallPath,
-            SOURCE_APPDATA => DetectionSource::AppData,
-            SOURCE_CLSID => DetectionSource::Clsid,
-            other => DetectionSource::Other(other.to_string()),
+/// Validate whether a candidate path is safe to be considered an installation directory.
+/// Reverse engineered from Geek Uninstaller FUN_00434ad4 & FUN_0047a0c0.
+pub fn is_safe_install_location(path: &Path) -> bool {
+    // 1. Must exist and be a directory
+    if !path.exists() || !path.is_dir() {
+        return false;
+    }
+
+    let path_str = path.to_string_lossy();
+
+    // 2. Syntax & Traversal Guard:
+    // Reject path traversal `..`
+    if path_str.contains("..") {
+        return false;
+    }
+
+    // Must have a drive specifier e.g. "C:\" or root
+    let components: Vec<_> = path.components().collect();
+    if components.len() <= 1 {
+        // Bare drive root like "C:\"
+        return false;
+    }
+
+    let normalized = normalize_path(path);
+    let (prefix_blacklist, exact_blacklist) = build_blacklists();
+
+    // 3. Must not match root blacklist
+    if exact_blacklist.contains(&normalized) {
+        return false;
+    }
+
+    // 4. Must not start with OS prefix blacklist
+    for blocked in &prefix_blacklist {
+        if normalized.starts_with(blocked) {
+            return false;
         }
     }
 
-    /// Confidence level for this source
-    pub fn confidence(&self) -> ConfidenceLevel {
-        match self {
-            DetectionSource::InstallPath => ConfidenceLevel::High,
-            DetectionSource::AppData => ConfidenceLevel::Medium,
-            DetectionSource::Clsid | DetectionSource::Other(_) => ConfidenceLevel::Low,
+    // 5. Vendor umbrella guard:
+    // If the folder is directly inside Program Files / Program Files (x86) / LocalAppData\Programs,
+    // ensure it is not a known shared umbrella vendor folder (e.g. C:\Program Files\Adobe).
+    // An install location inside Adobe must be at least a subfolder (e.g. C:\Program Files\Adobe\Photoshop).
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+        let name_lower = file_name.to_lowercase();
+        if let Some(parent) = path.parent() {
+            let parent_norm = normalize_path(parent);
+            if exact_blacklist.contains(&parent_norm) {
+                if PROTECTED_VENDOR_ROOTS.contains(&name_lower.as_str()) {
+                    return false;
+                }
+            }
         }
     }
+
+    true
 }
 
 /// Validates candidate leftovers before deletion.
@@ -149,12 +187,6 @@ impl SafetyValidator {
             ))),
             _ => Ok(()), // ref count 0 or not tracked = safe
         }
-    }
-
-    /// Assign confidence to a leftover based on its source tag. Mutates in place.
-    pub fn assign_confidence(item: &mut LeftoverItem) {
-        let source = DetectionSource::from_source_str(&item.source);
-        item.confidence = source.confidence();
     }
 
     /// Batch filter — returns (safe_items, blocked_count).
@@ -252,11 +284,11 @@ mod tests {
     use super::*;
 
     fn file_item(path: &str) -> LeftoverItem {
-        LeftoverItem::file(path.to_string(), ConfidenceLevel::High, SOURCE_INSTALL_PATH.to_string())
+        LeftoverItem::file(path.to_string(), SOURCE_INSTALL_PATH.to_string())
     }
 
     fn dir_item(path: &str) -> LeftoverItem {
-        LeftoverItem::directory(path.to_string(), ConfidenceLevel::High, SOURCE_INSTALL_PATH.to_string())
+        LeftoverItem::directory(path.to_string(), SOURCE_INSTALL_PATH.to_string())
     }
 
     // --- Exact-blocked roots ---
@@ -331,49 +363,19 @@ mod tests {
         let v = SafetyValidator::new();
         let item = LeftoverItem::registry_key(
             r"HKEY_LOCAL_MACHINE\SOFTWARE\LeftoverApp".to_string(),
-            ConfidenceLevel::High,
             SOURCE_INSTALL_PATH.to_string(),
         );
         assert!(v.validate(&item).is_ok());
     }
 
-    // --- Confidence assignment ---
-
     #[test]
-    fn confidence_install_path_is_high() {
-        let mut item = file_item(r"C:\SomeApp\file.txt");
-        item.confidence = ConfidenceLevel::Low;
-        SafetyValidator::assign_confidence(&mut item);
-        assert_eq!(item.confidence, ConfidenceLevel::High);
-    }
-
-    #[test]
-    fn confidence_appdata_is_medium() {
-        let mut item = LeftoverItem::file(
-            r"C:\Users\user\AppData\Local\SomeApp\cache".to_string(),
-            ConfidenceLevel::High,
-            SOURCE_APPDATA.to_string(),
-        );
-        SafetyValidator::assign_confidence(&mut item);
-        assert_eq!(item.confidence, ConfidenceLevel::Medium);
-    }
-
-    #[test]
-    fn confidence_clsid_is_low() {
-        let mut item = LeftoverItem::registry_key(
-            r"HKEY_CLASSES_ROOT\CLSID\{12345678-1234-1234-1234-123456789ABC}".to_string(),
-            ConfidenceLevel::High,
-            SOURCE_CLSID.to_string(),
-        );
-        SafetyValidator::assign_confidence(&mut item);
-        assert_eq!(item.confidence, ConfidenceLevel::Low);
-    }
-
-    #[test]
-    fn detection_source_roundtrip() {
-        assert_eq!(DetectionSource::from_source_str(SOURCE_INSTALL_PATH), DetectionSource::InstallPath);
-        assert_eq!(DetectionSource::from_source_str(SOURCE_APPDATA), DetectionSource::AppData);
-        assert_eq!(DetectionSource::from_source_str(SOURCE_CLSID), DetectionSource::Clsid);
-        assert!(matches!(DetectionSource::from_source_str("unknown"), DetectionSource::Other(_)));
+    fn test_is_safe_install_location_guards() {
+        // Must reject drive roots and dots
+        assert!(!is_safe_install_location(Path::new(r"C:\")));
+        assert!(!is_safe_install_location(Path::new(r"C:\Program Files\..\Windows")));
+        assert!(!is_safe_install_location(Path::new(r"C:\Windows")));
+        assert!(!is_safe_install_location(Path::new(r"C:\Program Files")));
+        assert!(!is_safe_install_location(Path::new(r"C:\Program Files\Common Files")));
+        assert!(!is_safe_install_location(Path::new(r"C:\Program Files\Adobe")));
     }
 }

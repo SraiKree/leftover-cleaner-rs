@@ -20,7 +20,7 @@ use tracing::warn;
 use crate::{
     domain::{
         error::ScannerError,
-        leftover::{ConfidenceLevel, LeftoverItem},
+        leftover::{LeftoverCategory, LeftoverItem},
         metadata::AppMetadata,
     },
     engine::safety::{SOURCE_APPDATA, SOURCE_INSTALL_PATH},
@@ -68,31 +68,40 @@ fn shortcut_roots() -> Vec<PathBuf> {
     ]
 }
 
-// ── Name matching helper ─────────────────────────────────────────────────────
+// ── Name matching helper (Geek Uninstaller parity) ───────────────────────────
 
-/// True if `dir_name` contains `app_token` or `publisher_token` as a substring.
-/// Case-insensitive. Only called with non-empty tokens.
-fn name_matches(dir_name: &str, app_token: &str, publisher_token: Option<&str>) -> bool {
-    let lower = dir_name.to_lowercase();
-    if lower.contains(app_token) {
+/// Match directory names strictly matching the app name or publisher.
+/// Unlike loose substring searching (`contains`), this requires exact slug match
+/// or exact folder equality to avoid false positives like `Codecs` matching `Code`.
+fn name_matches(dir_name: &str, app_slug: &str, pub_slug: Option<&str>) -> bool {
+    let dir_slug = slugify(dir_name);
+    if dir_slug.is_empty() {
+        return false;
+    }
+
+    if !app_slug.is_empty() && dir_slug == app_slug {
         return true;
     }
-    if let Some(pub_tok) = publisher_token {
-        if !pub_tok.is_empty() && lower.contains(pub_tok) {
+
+    if let Some(ps) = pub_slug {
+        if !ps.is_empty() && dir_slug == ps {
             return true;
         }
     }
+
     false
 }
 
-/// Produce a lowercase search token from a display name / publisher.
-/// Strips common version/edition noise so "MyApp 2.0 (x64)" → "myapp".
-fn tokenize(s: &str) -> String {
-    // Remove anything inside parentheses, common edition suffixes, version numbers
-    let stripped = regex::Regex::new(r"\(.*?\)|\d+(\.\d+)+|[_\-\.]{2,}|Edition|Professional|Standard|Enterprise|x64|x86|64-bit|32-bit")
+/// Normalize folder or app name into an alphanumeric slug for exact comparison.
+fn slugify(s: &str) -> String {
+    let stripped = regex::Regex::new(r"\(.*?\)|\b\d+(\.\d+)*\b|v\d+.*|Edition|Professional|Standard|Enterprise|x64|x86|64-bit|32-bit")
         .map(|re| re.replace_all(s, " ").to_string())
         .unwrap_or_else(|_| s.to_string());
-    stripped.trim().to_lowercase()
+    stripped
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
 }
 
 // ── Scan 1: Install location residue ─────────────────────────────────────────
@@ -120,13 +129,11 @@ pub fn scan_install_residue(
                 let item = if e.path().is_dir() {
                     LeftoverItem::directory(
                         e.path().to_string_lossy().to_string(),
-                        ConfidenceLevel::High, // overridden later by assign_confidence
                         SOURCE_INSTALL_PATH.to_string(),
                     )
                 } else {
                     LeftoverItem::file(
                         e.path().to_string_lossy().to_string(),
-                        ConfidenceLevel::High,
                         SOURCE_INSTALL_PATH.to_string(),
                     )
                 };
@@ -147,16 +154,16 @@ pub fn scan_install_residue(
 
 // ── Scan 2: AppData locations ─────────────────────────────────────────────────
 
-/// Search appdata roots for subdirectories whose name matches the app or publisher.
+/// Search appdata roots for subdirectories whose name strictly matches the app or publisher.
 /// Only goes one level deep — we don't want to scan everything in AppData.
 pub fn scan_appdata_locations(
     metadata: &AppMetadata,
     tx: &Sender<LeftoverItem>,
 ) -> Result<(), ScannerError> {
-    let app_token = tokenize(&metadata.display_name);
-    let pub_token = metadata.publisher.as_deref().map(tokenize);
+    let app_slug = slugify(&metadata.display_name);
+    let pub_slug = metadata.publisher.as_deref().map(slugify);
 
-    if app_token.is_empty() {
+    if app_slug.is_empty() {
         return Ok(());
     }
 
@@ -182,11 +189,10 @@ pub fn scan_appdata_locations(
             let dir_name = entry.file_name();
             let dir_name_str = dir_name.to_string_lossy();
 
-            if name_matches(&dir_name_str, &app_token, pub_token.as_deref()) {
+            if name_matches(&dir_name_str, &app_slug, pub_slug.as_deref()) {
                 // Flag the directory itself (cleaner will recurse)
                 let item = LeftoverItem::directory(
                     path.to_string_lossy().to_string(),
-                    ConfidenceLevel::Medium, // overridden later
                     SOURCE_APPDATA.to_string(),
                 );
                 if tx.send(item).is_err() {
@@ -227,8 +233,7 @@ pub fn scan_shortcuts(
                             if target.starts_with(install_location) {
                                 let item = LeftoverItem::file(
                                     e.path().to_string_lossy().to_string(),
-                                    ConfidenceLevel::High,
-                                    SOURCE_APPDATA.to_string(), // shortcuts = AppData category
+                                    SOURCE_APPDATA.to_string(), // shortcuts = FileSystem category
                                 );
                                 if tx.send(item).is_err() {
                                     return Ok(());
@@ -359,31 +364,25 @@ mod tests {
     // ── tokenize ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn tokenize_strips_version() {
-        assert_eq!(tokenize("MyApp 2.0"), "myapp");
-    }
-
-    #[test]
-    fn tokenize_strips_arch_suffix() {
-        let t = tokenize("MyApp x64 Edition");
-        assert!(t.contains("myapp"), "token: {t}");
-        assert!(!t.contains("x64"), "token: {t}");
-        assert!(!t.contains("edition"), "token: {t}");
+    fn slugify_strips_version_and_non_alphanumeric() {
+        assert_eq!(slugify("MyApp 2.0"), "myapp");
+        assert_eq!(slugify("MyApp x64 Edition"), "myapp");
     }
 
     // ── name_matches ──────────────────────────────────────────────────────────
 
     #[test]
-    fn name_matches_app_token() {
+    fn name_matches_app_slug() {
         assert!(name_matches("testapp", "testapp", None));
-        assert!(name_matches("TestApp Cache", "testapp", None));
+        assert!(name_matches("Test-App", "testapp", None));
+        assert!(!name_matches("Codecs", "code", None));
         assert!(!name_matches("otherestapp", "testapp", None));
     }
 
     #[test]
-    fn name_matches_publisher_token() {
-        assert!(name_matches("ACME Corp", "acmex", Some("acme")));
-        assert!(!name_matches("totally different", "acmex", Some("acme")));
+    fn name_matches_publisher_slug() {
+        assert!(name_matches("ACME Corp", "otherapp", Some("acmecorp")));
+        assert!(!name_matches("totally different", "otherapp", Some("acme")));
     }
 
     // ── scan_install_residue ──────────────────────────────────────────────────
