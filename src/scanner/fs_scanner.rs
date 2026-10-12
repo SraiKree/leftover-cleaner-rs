@@ -20,7 +20,7 @@ use tracing::warn;
 use crate::{
     domain::{
         error::ScannerError,
-        leftover::{LeftoverCategory, LeftoverItem},
+        leftover::LeftoverItem,
         metadata::AppMetadata,
     },
     engine::safety::{SOURCE_APPDATA, SOURCE_INSTALL_PATH},

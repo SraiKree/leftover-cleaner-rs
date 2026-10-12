@@ -7,6 +7,7 @@
 // validated LeftoverItems via crossbeam-channel to the caller.
 
 pub mod fs_scanner;
+pub mod loc_finder;
 pub mod msi_scanner;
 pub mod reg_scanner;
 
@@ -17,21 +18,19 @@ use crossbeam_channel::{unbounded, Receiver};
 use crate::{
     domain::{
         error::ScannerError,
-        leftover::{ConfidenceLevel, LeftoverItem},
+        leftover::LeftoverItem,
         metadata::AppMetadata,
     },
     engine::safety::SafetyValidator,
 };
 
+pub use loc_finder::InstallLocationFinder;
 use fs_scanner::scan_filesystem;
 use msi_scanner::scan_msi_database;
 use reg_scanner::scan_registry;
 
 /// Context from the uninstaller execution, passed to the scanner to improve
 /// detection accuracy.
-///
-/// MVP strategy: if the uninstaller ran and a file/dir still exists inside the
-/// install location, the uninstaller failed to remove it → boost to High confidence.
 #[derive(Debug, Clone, Default)]
 pub struct UninstallerContext {
     /// Whether the uninstaller was actually launched (false = skipped or failed to start)
@@ -52,26 +51,18 @@ impl UninstallerContext {
     }
 }
 
-/// Launch all scanners concurrently, boosting confidence using uninstaller context.
+/// Launch all scanners concurrently matching Geek Uninstaller architecture.
 ///
 /// Returns a `Receiver<LeftoverItem>` that streams validated results as they arrive.
-/// The receiver yields items until all scanner threads finish and drop their `Sender` ends.
-///
-/// # Parameters
-/// * `metadata`            — Shared application metadata (Arc for rayon workers).
-/// * `install_location`    — Resolved install path, if known.
-/// * `uninstaller_context` — Exit code + ran flag from the uninstaller.
-///   Items inside the install dir that still exist are promoted
-///   to High confidence when `ran == true`.
-///
-/// # Notes
-/// * Items failing `SafetyValidator::validate` are silently dropped.
-/// * Confidence: assigned by source tag, then boosted by uninstaller context.
+/// All detected items are 100% verified leftovers categorized as FileSystem or Registry.
 pub fn scan_all_with_context(
     metadata: Arc<AppMetadata>,
     install_location: Option<PathBuf>,
     uninstaller_context: UninstallerContext,
 ) -> Receiver<LeftoverItem> {
+    // If install_location wasn't passed, attempt resolution using InstallLocationFinder
+    let resolved_loc = install_location.or_else(|| InstallLocationFinder::find(&metadata));
+
     // Internal channel: scanners → safety filter
     let (raw_tx, raw_rx) = unbounded::<LeftoverItem>();
 
@@ -79,7 +70,7 @@ pub fn scan_all_with_context(
     let (safe_tx, safe_rx) = unbounded::<LeftoverItem>();
 
     // Shared install location
-    let loc_arc: Option<Arc<PathBuf>> = install_location.map(Arc::new);
+    let loc_arc: Option<Arc<PathBuf>> = resolved_loc.map(Arc::new);
 
     // Clone Arc handles for the three workers
     let meta_fs  = Arc::clone(&metadata);
@@ -114,38 +105,17 @@ pub fn scan_all_with_context(
         }
     });
 
-    // Pre-compute install dir prefix (lowercase) for fast path matching
-    let install_lower = loc_arc
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_lowercase());
-
-    // Safety-filter thread: validate, boost confidence, forward
+    // Safety-filter thread: validate against protected root guards and forward
     rayon::spawn(move || {
         let validator = SafetyValidator::new();
         for mut item in raw_rx {
-            // Step 1: assign base confidence from detection source tag
-            SafetyValidator::assign_confidence(&mut item);
-
-            // Step 2: boost to High if uninstaller ran and this item still
-            //         physically exists inside the install directory — the
-            //         uninstaller failed to clean it up.
             if uninstaller_context.ran {
-                if let Some(ref prefix) = install_lower {
-                    let item_lower = item.path.to_lowercase();
-                    if item_lower.starts_with(prefix.as_str())
-                        && item.kind.is_filesystem()
-                        && std::path::Path::new(&item.path).exists()
-                    {
-                        item.confidence = ConfidenceLevel::High;
-                        item.source = format!(
-                            "{} [uninstaller exit={}]",
-                            item.source, uninstaller_context.exit_code
-                        );
-                    }
-                }
+                item.source = format!(
+                    "{} [uninstaller exit={}]",
+                    item.source, uninstaller_context.exit_code
+                );
             }
 
-            // Step 3: validate against blacklist / shared-DLL guard
             match validator.validate(&item) {
                 Ok(()) => {
                     if safe_tx.send(item).is_err() {
@@ -157,7 +127,6 @@ pub fn scan_all_with_context(
                 }
             }
         }
-        // safe_tx drops here → safe_rx.iter() terminates for the caller
     });
 
     safe_rx
@@ -196,6 +165,7 @@ pub fn collect_leftovers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::LeftoverCategory;
     use std::fs;
     use tempfile::TempDir;
 
@@ -237,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_all_items_have_valid_confidence() {
+    fn scan_all_categorizes_correctly() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("file.exe"), b"exe").unwrap();
 
@@ -245,16 +215,7 @@ mod tests {
         let items = collect_leftovers(meta, Some(dir.path().to_path_buf())).unwrap();
 
         for item in &items {
-            assert!(
-                matches!(
-                    item.confidence,
-                    crate::domain::leftover::ConfidenceLevel::High
-                        | crate::domain::leftover::ConfidenceLevel::Medium
-                        | crate::domain::leftover::ConfidenceLevel::Low
-                ),
-                "unexpected confidence on {:?}",
-                item
-            );
+            assert_eq!(item.category, LeftoverCategory::FileSystem);
         }
     }
 
@@ -273,10 +234,10 @@ mod tests {
         }
     }
 
-    // ── UninstallerContext confidence boost ───────────────────────────────────
+    // ── UninstallerContext annotation ─────────────────────────────────────────
 
     #[test]
-    fn uninstaller_context_boosts_confidence_for_existing_files() {
+    fn uninstaller_context_annotates_source() {
         let dir = TempDir::new().unwrap();
         let leftover = dir.path().join("residue.dll");
         fs::write(&leftover, b"residue").unwrap();
@@ -290,20 +251,13 @@ mod tests {
         )
         .unwrap();
 
-        // Files inside install dir that exist → must be High confidence
         let residue = items.iter().find(|i| i.path.ends_with("residue.dll"));
         if let Some(item) = residue {
-            assert_eq!(
-                item.confidence,
-                ConfidenceLevel::High,
-                "expected High confidence from uninstaller context"
-            );
             assert!(
                 item.source.contains("uninstaller exit="),
                 "source should contain exit code annotation"
             );
         }
-        // (test passes even if residue.dll is filtered by safety validator for other reasons)
     }
 
     #[test]

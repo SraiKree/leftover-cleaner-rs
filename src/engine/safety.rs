@@ -98,10 +98,10 @@ pub fn is_safe_install_location(path: &Path) -> bool {
         let name_lower = file_name.to_lowercase();
         if let Some(parent) = path.parent() {
             let parent_norm = normalize_path(parent);
-            if exact_blacklist.contains(&parent_norm) {
-                if PROTECTED_VENDOR_ROOTS.contains(&name_lower.as_str()) {
-                    return false;
-                }
+            if exact_blacklist.contains(&parent_norm)
+                && PROTECTED_VENDOR_ROOTS.contains(&name_lower.as_str())
+            {
+                return false;
             }
         }
     }

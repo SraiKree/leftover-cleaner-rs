@@ -3,7 +3,7 @@ use bucket_uninstaller::domain::app::{Application, Discovered};
 use bucket_uninstaller::domain::leftover::LeftoverItem;
 use bucket_uninstaller::engine::{
     cleaner::SafeDeletionEngine, harvester, process::parse_uninstall_string,
-    process::resolve_exe_path, process::ProcessTreeGuard, resolver,
+    process::resolve_exe_path, process::ProcessTreeGuard,
 };
 use bucket_uninstaller::scanner::{self, UninstallerContext};
 use bucket_uninstaller::ui::tui;
@@ -79,13 +79,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    // Phase 2: Resolve install locations
+    // Phase 2: Resolve install locations using InstallLocationFinder
     info!("Phase 2: Resolving install locations...");
     let apps: Vec<Application<Discovered>> = metadata_list
         .into_iter()
         .map(|mut metadata| {
             if metadata.install_location.is_none() {
-                if let Ok(location) = resolver::resolve_install_location(&metadata) {
+                if let Some(location) = scanner::InstallLocationFinder::find(&metadata) {
                     metadata.install_location = Some(location.to_string_lossy().to_string());
                 }
             }

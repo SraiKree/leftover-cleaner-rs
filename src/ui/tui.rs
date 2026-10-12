@@ -8,7 +8,7 @@
 // All screens share the same dark palette and ratatui 0.30 APIs.
 
 use crate::domain::app::{Discovered, Scanned};
-use crate::domain::leftover::{ConfidenceLevel, LeftoverItem, LeftoverKind};
+use crate::domain::leftover::{LeftoverCategory, LeftoverItem};
 use crate::domain::metadata::AppMetadata;
 use crate::engine::process::{parse_uninstall_string, resolve_exe_path, ProcessTreeGuard};
 use crate::scanner::UninstallerContext;
@@ -38,7 +38,6 @@ const CYAN: Color = Color::Rgb(56, 189, 248);
 const _CYAN_DIM: Color = Color::Rgb(30, 110, 150);
 const GREEN: Color = Color::Rgb(34, 197, 94);
 const YELLOW: Color = Color::Rgb(250, 204, 21);
-const ORANGE: Color = Color::Rgb(251, 146, 60);
 const RED: Color = Color::Rgb(248, 113, 113);
 const BG: Color = Color::Rgb(9, 13, 18);
 const BG_PANEL: Color = Color::Rgb(13, 18, 26);
@@ -995,7 +994,7 @@ struct LeftoverReviewState {
     app: crate::domain::app::Application<Scanned>,
     selected_indices: Vec<bool>,
     list_state: ListState,
-    filter_confidence: Option<ConfidenceLevel>,
+    filter_category: Option<LeftoverCategory>,
 }
 
 impl LeftoverReviewState {
@@ -1003,12 +1002,13 @@ impl LeftoverReviewState {
         let count = app.leftovers.len();
         let mut list_state = ListState::default();
         if count > 0 { list_state.select(Some(0)); }
-        Self { app, selected_indices: vec![false; count], list_state, filter_confidence: None }
+        // Geek Uninstaller selects all verified leftovers by default
+        Self { app, selected_indices: vec![true; count], list_state, filter_category: None }
     }
 
     fn visible_leftovers(&self) -> Vec<(usize, &LeftoverItem)> {
         self.app.leftovers.iter().enumerate()
-            .filter(|(_, item)| self.filter_confidence.is_none_or(|f| item.confidence == f))
+            .filter(|(_, item)| self.filter_category.is_none_or(|c| item.category == c))
             .collect()
     }
 
@@ -1041,7 +1041,7 @@ impl LeftoverReviewState {
 
     fn select_all(&mut self) { self.selected_indices.fill(true); }
     fn deselect_all(&mut self) { self.selected_indices.fill(false); }
-    fn set_filter(&mut self, f: Option<ConfidenceLevel>) { self.filter_confidence = f; self.list_state.select(Some(0)); }
+    fn set_filter(&mut self, c: Option<LeftoverCategory>) { self.filter_category = c; self.list_state.select(Some(0)); }
 
     fn selected_leftover_indices(&self) -> Vec<usize> {
         self.selected_indices.iter().enumerate()
@@ -1084,9 +1084,8 @@ fn run_leftover_review_loop(
                     KeyCode::Char(' ') => state.toggle_current(),
                     KeyCode::Char('a') => state.select_all(),
                     KeyCode::Char('d') => state.deselect_all(),
-                    KeyCode::Char('1') => state.set_filter(Some(ConfidenceLevel::High)),
-                    KeyCode::Char('2') => state.set_filter(Some(ConfidenceLevel::Medium)),
-                    KeyCode::Char('3') => state.set_filter(Some(ConfidenceLevel::Low)),
+                    KeyCode::Char('f') => state.set_filter(Some(LeftoverCategory::FileSystem)),
+                    KeyCode::Char('r') => state.set_filter(Some(LeftoverCategory::Registry)),
                     KeyCode::Char('0') => state.set_filter(None),
                     KeyCode::Enter => return Ok(true),
                     _ => {}
@@ -1140,8 +1139,12 @@ fn draw_leftover_review(f: &mut Frame, state: &mut LeftoverReviewState) {
             Span::styled("All  ", Style::default().fg(FG_DIM)),
             Span::styled("[d] ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
             Span::styled("None  ", Style::default().fg(FG_DIM)),
-            Span::styled("[1/2/3/0] ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled("Filter  ", Style::default().fg(FG_DIM)),
+            Span::styled("[f] ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Files  ", Style::default().fg(FG_DIM)),
+            Span::styled("[r] ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Registry  ", Style::default().fg(FG_DIM)),
+            Span::styled("[0] ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("All Types  ", Style::default().fg(FG_DIM)),
             Span::styled(format!("[{} selected]", sel_count), Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)),
             Span::styled("  [q] Cancel", Style::default().fg(FG_DIM)),
         ])),
@@ -1152,10 +1155,9 @@ fn draw_leftover_review(f: &mut Frame, state: &mut LeftoverReviewState) {
 fn draw_leftover_list(f: &mut Frame, area: Rect, state: &mut LeftoverReviewState) {
     let visible = state.visible_leftovers();
     let count = visible.len();
-    let filter_label = match state.filter_confidence {
-        Some(ConfidenceLevel::High) => "  High only",
-        Some(ConfidenceLevel::Medium) => "  Med only",
-        Some(ConfidenceLevel::Low) => "  Low only",
+    let filter_label = match state.filter_category {
+        Some(LeftoverCategory::FileSystem) => "  Files only",
+        Some(LeftoverCategory::Registry) => "  Registry only",
         None => "",
     };
 
@@ -1174,20 +1176,9 @@ fn draw_leftover_list(f: &mut Frame, area: Rect, state: &mut LeftoverReviewState
     let items: Vec<ListItem> = visible.iter().map(|(idx, item)| {
         let checked = state.selected_indices[*idx];
         let check_col = if checked { GREEN } else { FG_DIM };
-        let kind_icon = match item.kind {
-            LeftoverKind::File => "📄",
-            LeftoverKind::Directory => "📁",
-            LeftoverKind::RegistryKey | LeftoverKind::RegistryValue => "🗝",
-        };
-        let conf_col = match item.confidence {
-            ConfidenceLevel::High => GREEN,
-            ConfidenceLevel::Medium => YELLOW,
-            ConfidenceLevel::Low => ORANGE,
-        };
-        let conf_label = match item.confidence {
-            ConfidenceLevel::High => "H",
-            ConfidenceLevel::Medium => "M",
-            ConfidenceLevel::Low => "L",
+        let (kind_icon, cat_col, cat_tag) = match item.category {
+            LeftoverCategory::FileSystem => ("📁", CYAN, "FILE"),
+            LeftoverCategory::Registry => ("🗝", YELLOW, "REG"),
         };
         let path_display = if item.path.len() > 52 {
             format!("…{}", &item.path[item.path.len() - 51..])
@@ -1200,7 +1191,7 @@ fn draw_leftover_list(f: &mut Frame, area: Rect, state: &mut LeftoverReviewState
             Span::styled(format!("{} ", kind_icon), Style::default().fg(FG_DIM)),
             Span::styled(path_display, Style::default().fg(FG_PRIMARY)),
             Span::raw(" "),
-            Span::styled(format!("[{}]", conf_label), Style::default().fg(conf_col).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("[{}]", cat_tag), Style::default().fg(cat_col).add_modifier(Modifier::BOLD)),
         ]))
     }).collect();
 
@@ -1228,16 +1219,12 @@ fn draw_leftover_detail(f: &mut Frame, area: Rect, state: &LeftoverReviewState) 
             let checked = state.selected_indices[*idx];
             let mut lines: Vec<Line> = vec![Line::default()];
             lines.push(Line::from(vec![
-                Span::styled("  Type       ", Style::default().fg(FG_DIM)),
-                Span::styled(format!("{:?}", item.kind), Style::default().fg(FG_MED)),
+                Span::styled("  Category   ", Style::default().fg(FG_DIM)),
+                Span::styled(item.category.description(), Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
             ]));
             lines.push(Line::from(vec![
-                Span::styled("  Confidence ", Style::default().fg(FG_DIM)),
-                Span::styled(item.confidence.description(), Style::default().fg(match item.confidence {
-                    ConfidenceLevel::High => GREEN,
-                    ConfidenceLevel::Medium => YELLOW,
-                    ConfidenceLevel::Low => ORANGE,
-                }).add_modifier(Modifier::BOLD)),
+                Span::styled("  Type       ", Style::default().fg(FG_DIM)),
+                Span::styled(format!("{:?}", item.kind), Style::default().fg(FG_MED)),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("  Source     ", Style::default().fg(FG_DIM)),

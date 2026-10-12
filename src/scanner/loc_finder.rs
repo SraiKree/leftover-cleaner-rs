@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 use strsim::normalized_levenshtein;
-use tracing::{debug, info};
+use tracing::info;
 use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::GetLongPathNameW;
 

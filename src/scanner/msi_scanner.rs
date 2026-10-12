@@ -32,7 +32,7 @@ use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
 use crate::{
     domain::{
         error::ScannerError,
-        leftover::{ConfidenceLevel, LeftoverItem},
+        leftover::LeftoverItem,
         metadata::AppMetadata,
     },
     engine::safety::SOURCE_INSTALL_PATH,
@@ -169,7 +169,6 @@ fn scan_product_components(
                         );
                         let item = LeftoverItem::registry_key(
                             reg_path,
-                            ConfidenceLevel::High,
                             SOURCE_INSTALL_PATH.to_string(),
                         );
                         let _ = tx.send(item);
@@ -211,7 +210,6 @@ fn scan_installer_folders(
             );
             let item = LeftoverItem::registry_value(
                 reg_path,
-                ConfidenceLevel::High,
                 SOURCE_INSTALL_PATH.to_string(),
             );
             let _ = tx.send(item);

@@ -98,7 +98,7 @@ impl Application<Purged> {
 mod tests {
     use super::*;
     use crate::domain::metadata::AppMetadata;
-    use crate::domain::leftover::{LeftoverItem, LeftoverKind};
+    use crate::domain::leftover::LeftoverItem;
 
     #[test]
     fn test_type_state_transitions() {

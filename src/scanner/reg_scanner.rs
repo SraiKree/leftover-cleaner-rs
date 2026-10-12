@@ -35,7 +35,7 @@ use winreg::{
 use crate::{
     domain::{
         error::ScannerError,
-        leftover::{LeftoverCategory, LeftoverItem},
+        leftover::LeftoverItem,
         metadata::AppMetadata,
     },
     engine::safety::{SOURCE_CLSID, SOURCE_INSTALL_PATH},
@@ -94,7 +94,7 @@ fn try_flag_software_key(
 ) {
     if base.open_subkey(subpath).is_ok() {
         let full = format!(r"{}\{}", hive_prefix, subpath);
-        let item = LeftoverItem::registry_key(full, ConfidenceLevel::High, SOURCE_INSTALL_PATH.to_string());
+        let item = LeftoverItem::registry_key(full, SOURCE_INSTALL_PATH.to_string());
         if tx.send(item).is_err() {
             // channel closed
         }
@@ -200,7 +200,7 @@ pub fn scan_app_paths(
         if should_flag {
             let full = format!(r"HKEY_LOCAL_MACHINE\{}", subkey_path);
             let item =
-                LeftoverItem::registry_key(full, ConfidenceLevel::High, SOURCE_INSTALL_PATH.to_string());
+                LeftoverItem::registry_key(full, SOURCE_INSTALL_PATH.to_string());
             let _ = tx.send(item);
         }
     }
@@ -225,7 +225,6 @@ pub fn scan_app_paths(
                         let full = format!(r"HKEY_LOCAL_MACHINE\{}\{}", app_paths_root, name);
                         let item = LeftoverItem::registry_key(
                             full,
-                            ConfidenceLevel::High,
                             SOURCE_INSTALL_PATH.to_string(),
                         );
                         let _ = tx.send(item);
@@ -295,7 +294,7 @@ pub fn scan_clsid(
                     guid, server_subkey
                 );
                 let item =
-                    LeftoverItem::registry_key(reg_path, ConfidenceLevel::Low, SOURCE_CLSID.to_string());
+                    LeftoverItem::registry_key(reg_path, SOURCE_CLSID.to_string());
                 if tx.send(item).is_err() {
                     return Ok(());
                 }
